@@ -4,10 +4,10 @@ cmake_minimum_required(VERSION 3.25)
 # NAME: the executable, the boot menu's app id, the data folder on the stick (<NAME>-data) and the settings prefix
 # (<NAME>_<KEY> in upper case, '-' → '_'). DISPLAY_NAME (≤ 47 bytes), ID (≤ 39) and VERSION (≤ 23) are what the boot
 # menu shows, read from the binary.
-set(APP_NAME "app-template")
-set(APP_DISPLAY_NAME "App Template")
-set(APP_ID "org.freesp16.app-template")
-set(APP_VERSION "1.0.0")
+set(APP_NAME "track16")
+set(APP_DISPLAY_NAME "Track16")
+set(APP_ID "io.github.oldwired.track16")
+set(APP_VERSION "0.1.0")
 
 project(${APP_NAME} VERSION ${APP_VERSION} LANGUAGES C CXX ASM)
 set(CMAKE_CXX_STANDARD 20)

@@ -43,5 +43,5 @@ jobs:
       - run: scripts/build-unit.sh
       - uses: actions/upload-artifact@v4
         with:
-          name: app-template
-          path: out/app-template
+          name: track16
+          path: out/track16
