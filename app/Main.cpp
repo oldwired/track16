@@ -20,6 +20,8 @@
 #include "Platform.h"
 #include "ProjectIdentity.h"
 
+#include <libopenmpt/libopenmpt.hpp>
+
 #include <signal.h>
 #include <unistd.h>
 
@@ -89,6 +91,7 @@ int run()
     auto settings = loadSettings(machine->paths().settingsFile);
     machine->configure(settings);
     logLine("START %s %s (%s) pid=%d", identity::displayName, identity::version, identity::id, static_cast<int>(getpid()));
+    logLine("LIBOPENMPT %s", openmpt::string::get("library_version").c_str());
     logLine("PLATFORM %s", machine->describe().c_str());
     logLine("SETTINGS file=%s", machine->paths().settingsFile.c_str());
 

@@ -71,6 +71,9 @@ target_compile_options(juce PRIVATE $<$<CONFIG:Release>:-O3>)
 juce_add_binary_data(app_fonts HEADER_NAME AppFonts.h NAMESPACE AppFonts SOURCES
     resources/fonts/Inter-Regular.subset.ttf resources/fonts/Inter-Medium.subset.ttf resources/fonts/Inter-SemiBold.subset.ttf)
 
+# ---- libopenmpt (third_party/libopenmpt): module playback -----------------------------------------------------------
+include(cmake/libopenmpt.cmake)
+
 # ---- The code: the hardware layer (hw/) and the app (app/), one library -------------------------------------------
 file(GLOB HW_SOURCES CONFIGURE_DEPENDS hw/controls/*.cpp hw/common/*.cpp hw/${PLATFORM}/*.cpp)
 list(FILTER HW_SOURCES EXCLUDE REGEX "/GlDispatch.cpp$") # in the executable: it includes the generated stub list
@@ -79,6 +82,7 @@ list(FILTER APP_SOURCES EXCLUDE REGEX "/Main.cpp$")
 add_library(code STATIC ${HW_SOURCES} ${APP_SOURCES})
 target_include_directories(code PUBLIC hw ${CMAKE_SOURCE_DIR} ${GENERATED})
 target_link_libraries(code PUBLIC juce PRIVATE app_fonts PUBLIC ALSA::ALSA X11::X11 Threads::Threads ${CMAKE_DL_LIBS})
+target_link_libraries(code PUBLIC openmpt)
 target_compile_options(code PRIVATE -Wall -Wextra -Wshadow $<$<CONFIG:Release>:-O3>)
 # The synth: let GCC vectorise float loops for NEON (NEON flushes denormals anyway).
 set_source_files_properties(app/Synth.cpp PROPERTIES COMPILE_OPTIONS
