@@ -32,6 +32,8 @@ BACK switches between them (HOME: the library).
 
 ## Controls
 
+An interactive map of the panel with every control: [docs/panel.html](docs/panel.html).
+
 | Control | Action |
 |---|---|
 | PLAY | Play / pause (MIDI Start/Continue/Stop follow) |

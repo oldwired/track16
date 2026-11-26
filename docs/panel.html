@@ -1,0 +1,549 @@
+<title>Track16 Panel Map</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;600;700&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+/* Layout: the instrument's panel as a working diagram on top, the full reference below it.
+   The panel itself is always drawn as the black hardware; the page around it follows the theme. */
+:root {
+  --bg: #eef0f2;
+  --surface: #ffffff;
+  --fg: #16181c;
+  --fg-2: #555b64;
+  --line: #d5d9de;
+  --accent: #2463d6;
+  --display: "Barlow Condensed", "Arial Narrow", "Helvetica Neue", Arial, sans-serif;
+  --body: "IBM Plex Sans", "Helvetica Neue", Arial, sans-serif;
+  --mono: "IBM Plex Mono", ui-monospace, Menlo, monospace;
+  /* function groups: the same hues on the panel and in the reference */
+  --g-transport: #3fcf78;
+  --g-nav: #6aa8ff;
+  --g-pads: #c58cff;
+  --g-sound: #3fd0d4;
+  --g-filter: #ff8a4c;
+  --g-midi: #ff5a64;
+  --g-unused: #7a8088;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0f1114; --surface: #171a1e; --fg: #e8eaed; --fg-2: #9aa1aa; --line: #2a2f36; --accent: #7fb0ff;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #0f1114; --surface: #171a1e; --fg: #e8eaed; --fg-2: #9aa1aa; --line: #2a2f36; --accent: #7fb0ff;
+  color-scheme: dark;
+}
+body { background: var(--bg); color: var(--fg); font-family: var(--body); font-size: 15px; line-height: 1.5; }
+.wrap {
+  max-width: 1280px; margin: 0 auto;
+  padding-left: max(16px, env(safe-area-inset-left, 0px));
+  padding-right: max(16px, env(safe-area-inset-right, 0px));
+  padding-block: 28px 56px;
+  display: grid; gap: 22px;
+}
+header { display: grid; gap: 6px; }
+h1 { font-family: var(--display); font-weight: 700; font-size: 2.4rem; letter-spacing: .02em; line-height: 1.05; margin: 0; text-wrap: balance; }
+.lede { margin: 0; color: var(--fg-2); max-width: 70ch; }
+.lede code { font-family: var(--mono); font-size: .88em; }
+
+.toolbar { display: flex; flex-wrap: wrap; gap: 12px 20px; align-items: center; }
+.toolbar .lab { font-family: var(--display); font-weight: 600; letter-spacing: .08em; text-transform: uppercase; font-size: .9rem; color: var(--fg-2); }
+.seg { display: inline-flex; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; background: var(--surface); }
+.seg button {
+  font: 600 .95rem/1 var(--display); letter-spacing: .06em; padding: 9px 14px; border: 0; background: transparent; color: var(--fg); cursor: pointer;
+}
+.seg button + button { border-left: 1px solid var(--line); }
+.seg button[aria-pressed="true"] { background: var(--g-pads); color: #14101a; }
+.seg button:focus-visible, .shift:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.shift {
+  font: 700 .95rem/1 var(--display); letter-spacing: .08em; padding: 9px 16px; border-radius: 8px; cursor: pointer;
+  border: 1px solid var(--line); background: var(--surface); color: var(--fg);
+}
+.shift[aria-pressed="true"] { background: #9fa3a9; color: #111; border-color: #9fa3a9; }
+
+.panel-frame { overflow-x: auto; border-radius: 14px; background: #08090a; }
+.panel-frame svg { display: block; width: 100%; min-width: 860px; height: auto; }
+svg text { font-family: var(--display); }
+.ctl { cursor: pointer; outline: none; }
+.ctl .hl { fill: none; stroke: transparent; stroke-width: 5; }
+.ctl:hover .hl, .ctl:focus-visible .hl, .ctl.on .hl { stroke: var(--hc, #fff); }
+.ctl.on .hl { stroke-width: 6; }
+
+.info {
+  display: grid; grid-template-columns: auto 1fr; gap: 4px 18px; align-items: baseline;
+  background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 16px 18px; min-height: 7.5em;
+}
+.info .name { grid-column: 1 / -1; display: flex; align-items: center; gap: 10px; font-family: var(--display); font-weight: 700; font-size: 1.35rem; letter-spacing: .04em; }
+.info dt { font-family: var(--display); font-weight: 600; letter-spacing: .08em; font-size: .85rem; color: var(--fg-2); text-transform: uppercase; }
+.info dd { margin: 0; min-width: 0; }
+.dot { width: 11px; height: 11px; border-radius: 50%; display: inline-block; flex: none; background: var(--c); box-shadow: 0 0 0 1px rgba(0,0,0,.25); }
+
+.key { display: flex; flex-wrap: wrap; gap: 8px 18px; font-size: .92rem; color: var(--fg-2); }
+.key span { display: inline-flex; align-items: center; gap: 7px; }
+
+.ref { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 380px), 1fr)); gap: 18px; }
+.ref section { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px 6px; min-width: 0; }
+.ref h2 { font-family: var(--display); font-weight: 700; font-size: 1.15rem; letter-spacing: .08em; text-transform: uppercase; margin: 0 0 6px; display: flex; align-items: center; gap: 9px; }
+.ref table { width: 100%; border-collapse: collapse; font-size: .92rem; }
+.ref td { padding: 7px 0; border-top: 1px solid var(--line); vertical-align: top; }
+.ref td:first-child { font-family: var(--display); font-weight: 600; letter-spacing: .05em; white-space: nowrap; padding-right: 14px; width: 1%; }
+.ref tr { cursor: pointer; }
+.ref tr:hover td, .ref tr.on td { background: color-mix(in srgb, var(--accent) 9%, transparent); }
+.ref .sh { color: var(--fg-2); display: block; }
+.ref .sh b { font-family: var(--display); font-weight: 700; letter-spacing: .06em; color: var(--fg); }
+.note { color: var(--fg-2); font-size: .9rem; margin: 0; max-width: 80ch; }
+@media (prefers-reduced-motion: no-preference) { .ctl .hl { transition: stroke .12s; } }
+@media (max-width: 600px) { h1 { font-size: 1.9rem; } .info { grid-template-columns: 1fr; } }
+</style>
+
+<div class="wrap">
+  <header>
+    <h1>Track16 Panel Map</h1>
+    <p class="lede">What every control on the SP-16 does while Track16 runs (version 0.1.0). Pick a pad mode and hold
+      SHIFT here to see the pads and keys change; point at any control for its full description.</p>
+  </header>
+
+  <div class="toolbar">
+    <span class="lab">Pad mode</span>
+    <div class="seg" role="group" aria-label="Pad mode" id="modes"></div>
+    <button class="shift" id="shift" aria-pressed="false" type="button">SHIFT</button>
+  </div>
+
+  <div class="panel-frame"><svg id="panel" viewBox="0 40 2000 1075" role="img" aria-label="SP-16 panel with Track16 functions"></svg></div>
+
+  <div class="info" id="info" aria-live="polite"></div>
+  <div class="key" id="key"></div>
+  <div class="ref" id="ref"></div>
+  <p class="note">The drawing follows freesp16's panel illustration. Lamps: the pads show the active mode (channel
+    colours, red = through the filter, slow blink = latched); the step keys show the order page (white = playing,
+    amber blinking = queued jump).</p>
+</div>
+
+<script>
+(() => {
+  const NS = 'http://www.w3.org/2000/svg';
+  const svg = document.getElementById('panel');
+  const GROUPS = {
+    transport: ['Transport and song', '--g-transport'],
+    nav: ['Screens and browsing', '--g-nav'],
+    pads: ['Pads and pad modes', '--g-pads'],
+    sound: ['Sound', '--g-sound'],
+    filter: ['Analog filter', '--g-filter'],
+    midi: ['MIDI', '--g-midi'],
+    unused: ['Not used by Track16', '--g-unused'],
+  };
+  const css = getComputedStyle(document.documentElement);
+  const col = g => css.getPropertyValue(GROUPS[g][1]).trim();
+
+  const state = { mode: 'filter', shift: false, sel: null };
+  const MODES = [
+    ['filter', 'FILTER', 'TRACK'], ['mute', 'MUTE', 'MUTE'], ['loop', 'LOOP', 'SLICE'], ['play', 'PLAY', 'SCALE'], ['kit', 'KIT', 'SHIFT + SCALE'],
+  ];
+  const LOOPS = [1, 2, 3, 4, 6, 8, 12, 16, 24, 32, 48, 64];
+  const NOTES = ['C-', 'C#', 'D-', 'D#', 'E-', 'F-', 'F#', 'G-', 'G#', 'A-', 'A#', 'B-'];
+  const note = i => NOTES[i % 12] + (5 + Math.floor(i / 12));
+
+  // ---------- drawing helpers ----------
+  const el = (tag, attrs = {}, parent = svg) => {
+    const e = document.createElementNS(NS, tag);
+    for (const [k, v] of Object.entries(attrs)) e.setAttribute(k, v);
+    parent.appendChild(e);
+    return e;
+  };
+  const rect = (x, y, w, h, r, fill, p, extra = {}) => el('rect', { x, y, width: w, height: h, rx: r, fill, ...extra }, p);
+  const circ = (cx, cy, r, fill, p, extra = {}) => el('circle', { cx, cy, r, fill, ...extra }, p);
+  const text = (x, y, s, size, fill, p, extra = {}) => {
+    const t = el('text', { x, y, 'font-size': size, fill, 'text-anchor': 'middle', 'dominant-baseline': 'central', 'font-weight': 600, 'letter-spacing': '0.04em', ...extra }, p);
+    t.textContent = s;
+    return t;
+  };
+  const silk = '#d9dce0';
+  const knob = (cx, cy, r, p, pointer = true) => {
+    circ(cx, cy + 4, r + 2, '#050506', p);
+    circ(cx, cy, r, '#2a2c30', p);
+    circ(cx, cy, r - 6, '#1b1c1f', p, { stroke: '#3b3e44', 'stroke-width': 2 });
+    if (pointer) el('line', { x1: cx, y1: cy, x2: cx, y2: cy - r + 8, stroke: '#f2f3f5', 'stroke-width': 5, 'stroke-linecap': 'round' }, p);
+  };
+
+  // ---------- the controls: geometry + what Track16 does ----------
+  // shape: ['c', cx, cy, r] or ['r', x, y, w, h, rx]
+  const C = [];
+  const add = c => (C.push(c), c);
+
+  add({ id: 'mainout', g: 'sound', s: ['c', 162, 168, 34], name: 'MAIN OUT', tag: 'VOLUME',
+    act: 'Output level of MAIN OUT and PHONES.', knob: true });
+  add({ id: 'drive', g: 'unused', s: ['c', 340, 165, 32], name: 'DRIVE', tag: 'NOT USED',
+    act: 'Not used yet. On the SP-16 the drive is a digital stage in the stock firmware, not part of the analog filter board. Track16 reads the knob but applies no drive.', knob: true });
+  add({ id: 'over', g: 'unused', s: ['r', 418, 162, 24, 8, 2], name: 'OVER lamp', tag: '',
+    act: 'Not lit by Track16 (it belongs to the drive stage).' });
+  add({ id: 'lp', g: 'filter', s: ['c', 515, 165, 32], name: 'LOW PASS CUTOFF', tag: 'LP · ANALOG',
+    act: 'Analog pot on the filter board. It acts on whatever goes through the filter: the whole mix (ACTIVE) or the channels on FILTER pads. Fully closed, the filtered part goes silent.', knob: true });
+  add({ id: 'res', g: 'filter', s: ['c', 690, 165, 32], name: 'RESONANCE', tag: 'RES · ANALOG',
+    act: 'Analog pot on the filter board, acts on the filtered audio only. Turned far up the filter can self-oscillate: a tone or noise that stays while a route is on, even with every channel muted.', knob: true });
+  add({ id: 'hp', g: 'filter', s: ['c', 865, 165, 32], name: 'HIGH PASS CUTOFF', tag: 'HP · ANALOG',
+    act: 'Sets the analog high-pass on the filter board: Track16 writes the knob position to the board\'s cutoff DAC.', knob: true });
+  add({ id: 'active', g: 'filter', s: ['c', 978, 168, 20], name: 'ANALOG FILTER ACTIVE', tag: 'WHOLE MIX',
+    act: 'Sends the whole mix through the analog filter, or back to pads only.', sh: 'Clears with SHIFT + STOP.',
+    lamp: 'Lit while any audio goes through the filter (whole mix or FILTER pads), and for a moment at start while Track16 measures the filter loop.' });
+
+  add({ id: 'smode', g: 'unused', s: ['r', 124, 268, 76, 44, 6], name: 'MODE (touch strip)', tag: 'NOT USED',
+    act: 'Not used. The strip always bends the tempo; its PITCH lamp stays lit.' });
+  add({ id: 'shold', g: 'unused', s: ['r', 124, 468, 76, 44, 6], name: 'HOLD (touch strip)', tag: 'NOT USED',
+    act: 'Not used. The tempo bend ends when you let go of the strip.' });
+  add({ id: 'strip', g: 'sound', s: ['r', 119, 534, 86, 359, 6], name: 'TOUCH STRIP', tag: 'TEMPO BEND',
+    act: 'Tempo bend while touched: above the middle faster, below slower, up to ±8 %. Letting go returns to the TEMPO knob\'s value.' });
+
+  // 4 x 4 pads: bottom row = pads 1-4
+  const PX = [272, 445, 619, 793], PY = [258, 400, 542, 684];
+  for (let r = 0; r < 4; r++) for (let c = 0; c < 4; c++) {
+    const n = (3 - r) * 4 + c + 1;
+    add({ id: 'pad' + n, g: 'pads', s: ['r', PX[c], PY[r], 142, 112, 10], name: 'PAD ' + n, pad: n });
+  }
+  const MK = [['ptrack', 'TRACK', 'filter'], ['pmute', 'MUTE', 'mute'], ['pslice', 'SLICE', 'loop'], ['pscale', 'SCALE', 'play']];
+  MK.forEach(([id, label, mode], i) => add({ id, g: 'pads', s: ['r', PX[i], 840, 142, 42, 5], name: label, modeKey: mode, silk: label }));
+
+  // display + touch zones (Track16's canvas 1280 x 768 drawn at 665 x 399)
+  const DX = 1054, DY = 267, DS = 665 / 1280;
+  const dz = (x, y, w, h) => [DX + x * DS, DY + y * DS, w * DS, h * DS];
+  add({ id: 'tback', g: 'nav', s: ['r', ...dz(16, 52, 96, 72), 4], name: 'SCREEN: ◀ button', tag: '',
+    act: 'Tap: switch between LIBRARY and PLAYER.' });
+  ['FILTER', 'MUTE', 'LOOP', 'PLAY'].forEach((m, i) => add({ id: 'tmode' + i, g: 'pads', s: ['r', ...dz(824 + 112 * i, 52, 104, 72), 4],
+    name: 'SCREEN: ' + m + ' button', act: i === 3 ? 'Tap: PLAY pad mode; tap again in PLAY: KIT mode.' : 'Tap: ' + m + ' pad mode.' }));
+  add({ id: 'tbody', g: 'nav', s: ['r', ...dz(0, 137, 1280, 487), 4], name: 'SCREEN: body',
+    act: 'PLAYER: the pattern rain (rows fall onto the playhead and flare in their instrument\'s colour). LIBRARY: tap a module to select it, tap it again to play it.' });
+  add({ id: 'tknobs', g: 'sound', s: ['r', ...dz(0, 624, 1280, 144), 4], name: 'SCREEN: knob strip',
+    act: 'Shows the six encoders\' values, right above them.' });
+
+  const ENC = [
+    ['TEMPO', 'Tempo 50…200 % in 1 % steps.', 'TEMPO 100 %', 'Back to 100 %.'],
+    ['PITCH', 'Pitch −12…+12 semitones.', 'PITCH 0', 'Back to 0.'],
+    ['STEREO', 'Stereo separation 0…200 % (100 % = as the module).', '', ''],
+    ['INTERP', 'Interpolation: none, linear, cubic, 8-tap sinc.', '', ''],
+    ['GAIN', 'Gain −24…+12 dB in 0.5 dB steps.', 'GAIN 0 dB', 'Back to 0 dB.'],
+    ['VIEW', 'Density of the pattern rain on the PLAYER screen.', '', ''],
+  ];
+  ENC.forEach(([tag, act, shTag, sh], i) => add({ id: 'enc' + (i + 1), g: i === 5 ? 'nav' : 'sound', s: ['c', 1083 + i * 121.5, 758, 44],
+    name: 'ENCODER ' + (i + 1), tag, shTag: shTag || tag, act, sh: sh || '', enc: true }));
+
+  add({ id: 'usbstop', g: 'unused', s: ['c', 1700, 168, 24], name: 'USB STOP', tag: 'NOT USED',
+    act: 'Not used. Quit with SHIFT + BACK before you pull the stick: Track16 and the boot menu write their logs to it.' });
+  add({ id: 'back', g: 'nav', s: ['r', 1800, 298, 58, 30, 14], name: 'BACK', tag: 'SWITCH VIEW', shTag: 'QUIT',
+    act: 'Switch between LIBRARY and PLAYER.', sh: 'Quit Track16 back to the boot menu.' });
+  add({ id: 'home', g: 'nav', s: ['c', 1914, 313, 16], name: 'HOME', tag: 'LIBRARY', act: 'Go to the LIBRARY.' });
+  add({ id: 'sel', g: 'nav', s: ['c', 1862, 470, 72], name: 'SELECT (turn / push)', tag: 'CHOOSE · PUSH: PLAY', shTag: 'CHOOSE ×10',
+    act: 'LIBRARY: turn to choose a module, push to play it. PLAYER: turn to choose the instrument for the PLAY pads, push to go back to the LIBRARY.',
+    sh: 'LIBRARY: moves 10 modules per step.' });
+
+  const T = [
+    ['shiftk', 'SHIFT', 'transport', 1083, 44, 'HOLD: SHIFT', 'HOLD: SHIFT', 'Hold for the SHIFT functions of the other controls.', '', ''],
+    ['rec', 'REC', 'midi', 1260, 46, 'MIDI NOTES', 'MIDI NOTES', 'MIDI notes out on/off: module channels 1–16 on MIDI channels 1–16. Off ends the notes that are on.', '', 'Lit red while MIDI notes go out.'],
+    ['stop', 'STOP', 'transport', 1387, 46, 'STOP · REWIND', 'RESET ALL', 'Stop and rewind to the start (MIDI Stop).', 'Also clears mutes, solos and the whole-mix filter.', ''],
+    ['play', 'PLAY', 'transport', 1515, 46, 'PLAY / PAUSE', 'PLAY / PAUSE', 'Play or pause. MIDI Start / Continue / Stop follow.', '', 'Lit green while playing.'],
+    ['scene', 'SCENE', 'transport', 1691, 46, '◀ MODULE', 'OCTAVE −', 'Previous module on the stick.', 'PLAY pads one octave down.', ''],
+    ['pattern', 'PATTERN', 'transport', 1862, 46, 'MODULE ▶', 'OCTAVE +', 'Next module on the stick.', 'PLAY pads one octave up. (The printed LENGTH is the stock firmware\'s SHIFT function.)', ''],
+  ];
+  T.forEach(([id, silkLabel, g, cx, w, tag, shTag, act, sh, lamp]) =>
+    add({ id, g, s: ['r', cx - w, 840, 2 * w, 42, 5], name: silkLabel, tag, shTag, act, sh, lamp, tr: { cx, w } }));
+
+  for (let i = 0; i < 16; i++)
+    add({ id: 'step' + (i + 1), g: 'transport', s: ['r', 112 + i * 92, 972, 64, 113, 6], name: 'STEP ' + (i + 1), step: i + 1,
+      act: `Jump to order ${i + 1} of the current order page (order page × 16 + ${i + 1}). When the jump happens is set by BAR 1–3.`,
+      sh: `Show order page ${i + 1} (orders ${i * 16}–${i * 16 + 15}) on the step keys.`,
+      lamp: 'White: the playing order. Amber blinking: the queued jump. Dim in the pattern\'s colour: the other orders.' });
+  const BARS = [
+    ['PAT', 'END', 'Jumps happen at the end of the current pattern.'],
+    ['BEAT', '', 'Jumps happen on the next beat (rows_per_beat, default 4 rows).'],
+    ['NEXT', 'ROW', 'Jumps happen on the next row.'],
+    ['PAT', 'LOOP', 'Pattern loop on/off: the current pattern repeats.'],
+  ];
+  BARS.forEach(([a, b, act], j) => add({ id: 'bar' + (j + 1), g: 'transport', s: ['r', 1643 + j * 72, 1003, 52, 82, 6], name: 'BAR ' + (j + 1), bar: [a, b], act,
+    lamp: j < 3 ? 'Lit: the selected jump timing.' : 'Lit while the pattern loop is on.' }));
+
+  // ---------- pad behaviour per mode ----------
+  function padInfo(n) {
+    const i = n - 1;
+    switch (state.mode) {
+      case 'filter': return { label: 'CH ' + n, sub: state.shift ? 'LATCH' : 'HOLD: FILTER',
+        act: `Hold: channel ${n} goes through the analog filter while held.`, sh: 'SHIFT + pad: keep the channel on the filter (latch); again to release.',
+        lamp: 'Red: through the filter (slow blink: latched). Otherwise the channel\'s colour, brighter while it plays.' };
+      case 'mute': return { label: 'CH ' + n, sub: state.shift ? 'SOLO' : 'MUTE',
+        act: `Mute channel ${n} on/off.`, sh: 'SHIFT + pad: solo on/off.', lamp: 'Faint: muted. White: solo. Otherwise the channel\'s colour, brighter while it plays.' };
+      case 'loop':
+        if (i >= 12) return { label: '—', sub: '', act: 'No loop length on pads 13–16.', sh: '', lamp: 'Off.' };
+        return { label: LOOPS[i] + (LOOPS[i] === 1 ? ' ROW' : ' ROWS'), sub: state.shift ? 'KEEP' : 'HOLD: LOOP',
+          act: `Hold: repeat the last ${LOOPS[i]} row${LOOPS[i] === 1 ? '' : 's'} (a stutter loop). On release the song continues where it would have been, in time.`,
+          sh: 'SHIFT + pad: keep the loop running after release; again to stop it.', lamp: 'Amber: the running loop (slow blink: kept). Dim otherwise.' };
+      case 'play': return { label: note(i), sub: state.shift ? 'INSTR ' + n : 'PLAY NOTE',
+        act: `Play the selected instrument at ${note(i)} (pad 1 = C-5; SHIFT + SCENE / PATTERN moves the octave).`,
+        sh: `SHIFT + pad: select instrument ${n} for the PLAY pads.`, lamp: 'White flash on hit. The C pads are blue.' };
+      case 'kit': return { label: 'INSTR ' + n, sub: 'PLAY',
+        act: `Play instrument ${n} at its standard pitch.`, sh: '', lamp: 'The instrument\'s colour, flashing on hit.' };
+    }
+  }
+  const PADCOL = { filter: ['#ff9a6a', '#ff5a3c'], mute: ['#c58cff', '#8f6bff'], loop: ['#ffc24a', '#ff9f1c'], play: ['#6ec3ff', '#3d7dff'], kit: ['#7ef0b0', '#2fd6a0'] };
+
+  // ---------- draw ----------
+  const defs = el('defs');
+  defs.innerHTML = `
+    <radialGradient id="padglow" cx="50%" cy="50%" r="55%"><stop offset="0" stop-color="#fff" stop-opacity=".55"/><stop offset="1" stop-color="#fff" stop-opacity="0"/></radialGradient>`;
+  rect(0, 45, 2000, 1140, 18, '#0d0e10');
+  rect(8, 50, 1984, 1055, 14, '#18191c');
+
+  // filter section silkscreen
+  const fl = (x1, y1, x2, y2) => el('line', { x1, y1, x2, y2, stroke: silk, 'stroke-width': 2 });
+  fl(272, 110, 272, 230); fl(272, 110, 460, 110); fl(575, 110, 810, 110); fl(915, 110, 935, 110); fl(935, 110, 935, 230); fl(272, 230, 935, 230); fl(778, 125, 778, 225);
+  text(517, 110, 'LOW PASS', 18, silk); text(863, 110, 'HIGH PASS', 18, silk); text(162, 111, 'MAIN OUT', 17, silk);
+  [[340, 'DRIVE'], [515, 'CUTOFF'], [690, 'RESONANCE'], [865, 'CUTOFF']].forEach(([x, l]) => text(x, 216, l, 16, silk));
+  text(430, 186, 'OVER', 14, silk); text(978, 218, 'ACTIVE', 16, silk);
+  text(1700, 123, '— USB STOP', 15, silk); text(1835, 274, 'BACK', 16, silk); text(1912, 274, 'HOME', 16, silk);
+  rect(1815, 128, 95, 117, 6, '#2a2c30'); rect(1822, 140, 81, 60, 4, '#050506'); rect(1840, 216, 48, 8, 3, '#4add8c');
+  text(1862, 160, 'USB', 14, '#6b7078');
+  rect(105, 255, 114, 657, 6, '#0a0b0c');
+  text(162, 351, 'PITCH', 15, '#4add8c'); text(162, 377, 'REPEAT', 15, '#555a60'); text(162, 403, 'USER1', 15, '#555a60'); text(162, 429, 'USER2', 15, '#555a60');
+  for (let i = 0; i < 16; i++) text(112 + i * 92 + 32, 953, String(i + 1), 16, silk);
+  for (let j = 0; j < 4; j++) { text(1643 + j * 72 + 26, 953, String(j + 1), 16, silk); }
+  rect(1816, 893, 92, 20, 2, silk); text(1862, 903, 'LENGTH', 14, '#0d0e10');
+  for (let r = 0; r < 4; r++) for (let c = 0; c < 4; c++) text(PX[c] + 2, PY[r] - 13, String((3 - r) * 4 + c + 1), 16, silk, svg, { 'text-anchor': 'start' });
+
+  // the display, drawn as Track16's PLAYER screen
+  rect(1020, 255, 732, 423, 8, '#2a2c30'); rect(1030, 265, 712, 403, 6, '#050506');
+  const scr = el('g');
+  rect(DX, DY, 665, 399, 2, '#0b0d10', scr);
+  rect(DX, DY + 40 * DS, 665, 96 * DS, 0, '#14171c', scr);
+  const slot = (x, w, a, b) => { rect(DX + x * DS, DY + 52 * DS, w * DS, 72 * DS, 4, '#1e232a', scr);
+    if (b) { text(DX + (x + w / 4) * DS, DY + 76 * DS, a, 9, '#7c848f', scr); text(DX + (x + 3 * w / 4) * DS, DY + 76 * DS, b, 9, '#7c848f', scr);
+      text(DX + (x + w / 4) * DS, DY + 104 * DS, '12', 14, '#e6e8eb', scr); text(DX + (x + 3 * w / 4) * DS, DY + 104 * DS, a === 'ORDER' ? '32' : '125', 14, '#e6e8eb', scr); } };
+  slot(16, 96, '◀'); text(DX + 64 * DS, DY + 88 * DS, '◀', 16, '#e6e8eb', scr);
+  slot(120, 256, 'ORDER', 'ROW'); slot(384, 256, 'SPEED', 'BPM');
+  text(DX + 664 * DS, DY + 76 * DS, 'IT · 8 CH', 9, '#7c848f', scr, { 'text-anchor': 'start' });
+  text(DX + 664 * DS, DY + 104 * DS, 'module title', 12, '#e6e8eb', scr, { 'text-anchor': 'start' });
+  const tmodeText = [];
+  ['FILTER', 'MUTE', 'LOOP', 'PLAY'].forEach((m, i) => { rect(DX + (824 + 112 * i) * DS, DY + 52 * DS, 104 * DS, 72 * DS, 4, '#1e232a', scr);
+    tmodeText.push(text(DX + (876 + 112 * i) * DS, DY + 88 * DS, m, 12, '#e6e8eb', scr)); });
+  // rain
+  for (let c = 0; c < 8; c++) for (let r = 0; r < 14; r++) {
+    const on = (c * 7 + r * 3) % 5 === 0;
+    rect(DX + (40 + c * 150) * DS, DY + (160 + r * 32) * DS, 96 * DS, 18 * DS, 2, on ? ['#c58cff', '#3fd0d4', '#ffc24a', '#ff8a4c'][(c + r) % 4] : '#1a1e24', scr, { opacity: on ? 0.55 + (r / 30) : 1 });
+  }
+  el('line', { x1: DX, x2: DX + 665, y1: DY + 560 * DS, y2: DY + 560 * DS, stroke: '#e6e8eb', 'stroke-width': 1.5, opacity: .7 }, scr);
+  rect(DX, DY + 624 * DS, 665, 144 * DS, 0, '#14171c', scr);
+  const encCaps = [];
+  ENC.forEach(([tag], i) => encCaps.push(text(DX + (120 + i * 208) * DS, DY + 666 * DS, tag, 10, '#7c848f', scr)));
+  ['104 %', '+0', '100 %', 'CUBIC', '+0.0 dB', 'MEDIUM'].forEach((v, i) => text(DX + (120 + i * 208) * DS, DY + 708 * DS, v, 13, '#e6e8eb', scr));
+
+  // the controls
+  const nodes = {};
+  for (const c of C) {
+    const g = el('g', { class: 'ctl', tabindex: 0, role: 'button', 'data-id': c.id });
+    g.style.setProperty('--hc', col(c.g));
+    const [k, ...a] = c.s;
+    if (c.knob) knob(a[0], a[1], a[2], g);
+    else if (c.enc) { knob(a[0], a[1], 40, g, false); circ(a[0], a[1], 44, 'none', g, { stroke: '#3b3e44', 'stroke-width': 3 }); }
+    else if (c.id === 'sel') { circ(a[0], a[1], 72, '#050506', g, { stroke: '#e6e8eb', 'stroke-width': 3 }); knob(a[0], a[1], 56, g, false); }
+    else if (c.id === 'active') { circ(a[0], a[1], 20, '#2a2c30', g); c.lampEl = circ(a[0], a[1], 13, '#c4252b', g); }
+    else if (c.id === 'usbstop') { circ(a[0], a[1], 24, '#2a2c30', g); circ(a[0], a[1], 14, '#6e1d22', g); }
+    else if (c.id === 'home') circ(a[0], a[1], a[2], '#2a2c30', g);
+    else if (c.id === 'back') rect(a[0], a[1], a[2], a[3], a[4], '#2a2c30', g);
+    else if (c.id === 'over') rect(a[0], a[1], a[2], a[3], a[4], '#5a4620', g);
+    else if (c.id === 'smode' || c.id === 'shold') { rect(a[0], a[1], a[2], a[3], a[4], '#2a2c30', g, { stroke: '#9fa3a9', 'stroke-width': 2 }); text(a[0] + a[2] / 2, a[1] + a[3] / 2, c.id === 'smode' ? 'MODE' : 'HOLD', 16, silk, g); }
+    else if (c.id === 'strip') {
+      rect(a[0], a[1], a[2], a[3], a[4], '#141517', g, { stroke: '#3b3e44', 'stroke-width': 2 });
+      for (let i = 0; i < 16; i++) rect(156, 550 + i * 20.6, 12, 14.6, 2, i === 8 || i === 7 ? '#2b6cff' : '#16223f', g);
+    }
+    else if (c.pad) {
+      c.padRect = rect(a[0], a[1], a[2], a[3], a[4], '#333', g);
+      rect(a[0] + 20, a[1] + 15, a[2] - 40, a[3] - 30, 30, 'url(#padglow)', g);
+      c.padLabel = text(a[0] + a[2] / 2, a[1] + a[3] / 2 - 8, '', 26, '#121316', g, { 'font-weight': 700 });
+      c.padSub = text(a[0] + a[2] / 2, a[1] + a[3] / 2 + 22, '', 15, '#121316', g, { 'font-weight': 700 });
+    }
+    else if (c.modeKey || c.tr) {
+      const isShift = c.id === 'shiftk';
+      const border = c.id === 'rec' ? '#e2343a' : c.id === 'play' ? '#3bd16f' : isShift ? '#9fa3a9' : '#e6e8eb';
+      c.keyOuter = rect(a[0], a[1], a[2], a[3], a[4], border, g);
+      c.keyInner = rect(a[0] + 4, a[1] + 4, a[2] - 8, a[3] - 8, 3, isShift ? '#2a2c30' : '#0d0e10', g);
+      if (c.id === 'rec') circ(a[0] + a[2] / 2, a[1] + 21, 9, '#e2343a', g);
+      else if (c.id === 'stop') rect(a[0] + a[2] / 2 - 8, a[1] + 13, 16, 16, 1, '#e6e8eb', g);
+      else if (c.id === 'play') el('polygon', { points: `${a[0] + a[2] / 2 - 9},${a[1] + 11} ${a[0] + a[2] / 2 - 9},${a[1] + 31} ${a[0] + a[2] / 2 + 11},${a[1] + 21}`, fill: '#3bd16f' }, g);
+      else c.keyText = text(a[0] + a[2] / 2, a[1] + 21, c.silk || c.name, 17, '#e6e8eb', g);
+    }
+    else if (c.step) {
+      if ((c.step - 1) % 4 === 0) rect(a[0], 943, 64, 19, 2, 'none', g, { stroke: silk, 'stroke-width': 2 });
+      c.padRect = rect(a[0], a[1], a[2], a[3], a[4], '#333', g);
+      c.padLabel = text(a[0] + 32, a[1] + 42, '', 15, '#121316', g, { 'font-weight': 700 });
+      c.padSub = text(a[0] + 32, a[1] + 68, '', 22, '#121316', g, { 'font-weight': 700 });
+    }
+    else if (c.bar) {
+      rect(a[0], 972, 52, 9, 2, '#3bd16f', g);
+      c.padRect = rect(a[0], a[1], a[2], a[3], a[4], '#4a8cff', g);
+      text(a[0] + 26, a[1] + 30, c.bar[0], 15, '#0c1220', g, { 'font-weight': 700 });
+      if (c.bar[1]) text(a[0] + 26, a[1] + 52, c.bar[1], 15, '#0c1220', g, { 'font-weight': 700 });
+    }
+    // the hit area + highlight ring
+    if (k === 'c') { circ(a[0], a[1], a[2] + 9, 'transparent', g); c.hl = circ(a[0], a[1], a[2] + 7, 'none', g, { class: 'hl' }); }
+    else { rect(a[0] - 4, a[1] - 4, a[2] + 8, a[3] + 8, (a[4] || 0) + 3, 'transparent', g); c.hl = rect(a[0] - 4, a[1] - 4, a[2] + 8, a[3] + 8, (a[4] || 0) + 3, 'none', g, { class: 'hl' }); }
+    nodes[c.id] = g;
+    c.node = g;
+  }
+
+  // function labels in the group colours
+  const tags = el('g', { 'pointer-events': 'none' });
+  const tagText = {};
+  const putTag = (c, x, y, size = 16, anchor = 'middle') => { tagText[c.id] = text(x, y, '', size, col(c.g), tags, { 'text-anchor': anchor, 'font-weight': 700 }); };
+  const byId = Object.fromEntries(C.map(c => [c.id, c]));
+  putTag(byId.mainout, 162, 76); putTag(byId.drive, 340, 76); putTag(byId.lp, 515, 76); putTag(byId.res, 690, 76); putTag(byId.hp, 865, 76);
+  putTag(byId.active, 990, 76);
+  putTag(byId.smode, 162, 326, 13); putTag(byId.shold, 162, 526, 13);
+  putTag(byId.usbstop, 1700, 212, 14); putTag(byId.back, 1829, 350, 14); putTag(byId.home, 1914, 350, 14);
+  putTag(byId.sel, 1862, 566, 15);
+  for (let i = 1; i <= 6; i++) putTag(byId['enc' + i], 1083 + (i - 1) * 121.5, 820, 15);
+  T.forEach(([id, , , cx]) => putTag(byId[id], cx, id === 'pattern' ? 928 : 904, 15));
+  MK.forEach(([id], i) => putTag(byId[id], PX[i] + 71, 904, 15));
+  const stripTag = text(0, 0, '', 16, col('sound'), tags, { transform: 'translate(140 713) rotate(-90)', 'font-weight': 700 });
+  stripTag.textContent = 'TEMPO BEND ±8 %';
+  const modeTagText = { filter: 'FILTER', mute: 'MUTE', loop: 'LOOP', play: 'PLAY', kit: 'KIT' };
+
+  // ---------- render state ----------
+  function render() {
+    const sh = state.shift;
+    for (const c of C) {
+      const t = tagText[c.id];
+      if (t) t.textContent = sh && c.shTag ? c.shTag : (c.tag || '');
+    }
+    MK.forEach(([id, , mode]) => {
+      const c = byId[id];
+      const active = state.mode === mode || (mode === 'play' && state.mode === 'kit');
+      c.keyInner.setAttribute('fill', active ? '#e6e8eb' : '#0d0e10');
+      c.keyText.setAttribute('fill', active ? '#0d0e10' : '#e6e8eb');
+      tagText[id].textContent = mode === 'play' ? (sh ? 'KIT' : 'PLAY') : modeTagText[mode];
+    });
+    byId.shiftk.keyInner.setAttribute('fill', sh ? '#9fa3a9' : '#2a2c30');
+    byId.shiftk.keyText.setAttribute('fill', sh ? '#111' : '#e6e8eb');
+    const [lo, hi] = PADCOL[state.mode];
+    for (let n = 1; n <= 16; n++) {
+      const c = byId['pad' + n], p = padInfo(n);
+      c.padLabel.textContent = p.label; c.padSub.textContent = p.sub;
+      c.padRect.setAttribute('fill', p.label === '—' ? '#2a2c30' : (n % 2 ? lo : hi));
+      c.padLabel.setAttribute('fill', p.label === '—' ? '#6b7078' : '#121316');
+      Object.assign(c, { act: p.act, sh: p.sh, lamp: p.lamp });
+    }
+    for (let n = 1; n <= 16; n++) {
+      const c = byId['step' + n];
+      c.padLabel.textContent = sh ? 'PAGE' : 'ORDER';
+      c.padSub.textContent = String(n);
+      c.padRect.setAttribute('fill', sh ? '#cfd3d8' : n === 3 ? '#f4f6f8' : n === 6 ? '#ffc24a' : ['#e8d28a', '#a6e08a', '#9aa6f0', '#f0a0c8'][(n - 1) % 4]);
+    }
+    tmodeText.forEach((t, i) => t.setAttribute('fill', (state.mode === ['filter', 'mute', 'loop', 'play'][i] || (i === 3 && state.mode === 'kit')) ? '#c58cff' : '#e6e8eb'));
+    byId.active.lampEl.setAttribute('fill', state.mode === 'filter' ? '#ff3b3b' : '#6e1d22');
+    document.querySelectorAll('#modes button').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.mode === state.mode)));
+    document.getElementById('shift').setAttribute('aria-pressed', String(sh));
+    for (const c of C) c.node.setAttribute('aria-label', c.name + ': ' + (c.act || ''));
+    show(state.sel || 'pad1', false);
+    renderRef();
+  }
+
+  // ---------- info ----------
+  const info = document.getElementById('info');
+  function show(id, pin) {
+    const c = byId[id];
+    if (!c) return;
+    if (pin) state.sel = id;
+    C.forEach(x => x.node.classList.toggle('on', x.id === (state.sel || id)));
+    const modeName = MODES.find(m => m[0] === state.mode)[1];
+    const rows = [['Does', c.act || '—']];
+    if (c.sh) rows.push(['With SHIFT', c.sh]);
+    if (c.lamp) rows.push(['Lamp', c.lamp]);
+    info.innerHTML = '';
+    const head = document.createElement('div');
+    head.className = 'name';
+    head.innerHTML = `<span class="dot" style="--c:var(${GROUPS[c.g][1]})"></span>`;
+    head.append(c.name + (c.pad ? ` · ${modeName} mode` : ''));
+    info.append(head);
+    for (const [k, v] of rows) {
+      const dt = document.createElement('dt'); dt.textContent = k;
+      const dd = document.createElement('dd'); dd.textContent = v;
+      info.append(dt, dd);
+    }
+  }
+  svg.addEventListener('pointerover', e => { const g = e.target.closest('.ctl'); if (g) show(g.dataset.id, false); });
+  svg.addEventListener('pointerleave', () => show(state.sel || 'pad1', false));
+  svg.addEventListener('focusin', e => { const g = e.target.closest('.ctl'); if (g) show(g.dataset.id, false); });
+  svg.addEventListener('click', e => {
+    const g = e.target.closest('.ctl'); if (!g) return;
+    const id = g.dataset.id, c = byId[id];
+    if (c.modeKey) { state.mode = c.modeKey === 'play' && state.shift ? 'kit' : c.modeKey; }
+    if (id === 'shiftk') state.shift = !state.shift;
+    if (id.startsWith('tmode')) { const i = +id.slice(5); state.mode = ['filter', 'mute', 'loop', i === 3 && state.mode === 'play' ? 'kit' : 'play'][i]; }
+    state.sel = id;
+    render();
+  });
+  svg.addEventListener('keydown', e => { if ((e.key === 'Enter' || e.key === ' ') && e.target.closest('.ctl')) { e.preventDefault(); e.target.closest('.ctl').dispatchEvent(new MouseEvent('click', { bubbles: true })); } });
+
+  // ---------- toolbar ----------
+  const modesEl = document.getElementById('modes');
+  for (const [m, label, key] of MODES) {
+    const b = document.createElement('button');
+    b.type = 'button'; b.dataset.mode = m; b.textContent = label; b.title = 'Key: ' + key;
+    b.addEventListener('click', () => { state.mode = m; state.sel = 'pad1'; render(); });
+    modesEl.append(b);
+  }
+  document.getElementById('shift').addEventListener('click', () => { state.shift = !state.shift; render(); });
+
+  // ---------- key + reference ----------
+  const key = document.getElementById('key');
+  for (const g of Object.keys(GROUPS)) {
+    const s = document.createElement('span');
+    s.innerHTML = `<span class="dot" style="--c:var(${GROUPS[g][1]})"></span>`;
+    s.append(GROUPS[g][0]);
+    key.append(s);
+  }
+  const REF = [
+    ['transport', ['play', 'stop', 'shiftk', 'scene', 'pattern', 'step1', 'bar1', 'bar2', 'bar3', 'bar4']],
+    ['pads', ['ptrack', 'pmute', 'pslice', 'pscale', 'pad1']],
+    ['filter', ['active', 'lp', 'res', 'hp']],
+    ['sound', ['mainout', 'enc1', 'enc2', 'enc3', 'enc4', 'enc5', 'strip']],
+    ['nav', ['sel', 'back', 'home', 'enc6', 'tback', 'tbody']],
+    ['midi', ['rec']],
+    ['unused', ['drive', 'over', 'smode', 'shold', 'usbstop']],
+  ];
+  const MODEKEY_ACT = {
+    ptrack: ['FILTER mode: hold a pad to send that channel through the analog filter. Press again: the next 16 channels.', ''],
+    pmute: ['MUTE mode: pads mute channels. Press again: the next 16 channels.', ''],
+    pslice: ['LOOP mode: hold a pad for a stutter loop of 1–64 rows.', ''],
+    pscale: ['PLAY mode: the pads play the selected instrument chromatically. Press again: the next 16 instruments.', 'KIT mode: pads 1–16 play instruments 1–16.'],
+  };
+  for (const [id, [act, sh]] of Object.entries(MODEKEY_ACT)) Object.assign(byId[id], { act, sh, lamp: 'Lit: the active mode (KIT: SCALE blinks).' });
+  const refEl = document.getElementById('ref');
+  function renderRef() {
+    refEl.innerHTML = '';
+    for (const [g, ids] of REF) {
+      const sec = document.createElement('section');
+      const h = document.createElement('h2');
+      h.innerHTML = `<span class="dot" style="--c:var(${GROUPS[g][1]})"></span>`;
+      h.append(GROUPS[g][0]);
+      const tb = document.createElement('table');
+      for (const id of ids) {
+        const c = byId[id];
+        const tr = document.createElement('tr');
+        tr.dataset.id = id;
+        const name = id === 'step1' ? 'STEP 1–16' : id === 'pad1' ? 'PADS 1–16' : c.name;
+        const act = id === 'step1' ? 'Jump to an order of the current order page; BAR 1–3 set when.' :
+          id === 'pad1' ? 'Depend on the pad mode: pick one above to see each pad on the drawing.' : c.act;
+        const sh = id === 'step1' ? 'Choose the order page (pages of 16 orders).' : id === 'pad1' ? '' : c.sh;
+        const td1 = document.createElement('td'); td1.textContent = name;
+        const td2 = document.createElement('td'); td2.textContent = act;
+        if (sh) { const s = document.createElement('span'); s.className = 'sh'; s.innerHTML = '<b>SHIFT</b> '; s.append(sh); td2.append(s); }
+        tr.append(td1, td2);
+        tr.addEventListener('pointerenter', () => { show(id, false); tr.classList.add('on'); });
+        tr.addEventListener('pointerleave', () => tr.classList.remove('on'));
+        tr.addEventListener('click', () => { state.sel = id; show(id, true); document.querySelector('.panel-frame').scrollIntoView({ behavior: 'smooth', block: 'nearest' }); });
+        tb.append(tr);
+      }
+      sec.append(h, tb);
+      refEl.append(sec);
+    }
+  }
+  render();
+})();
+</script>
