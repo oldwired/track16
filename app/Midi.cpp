@@ -2,13 +2,96 @@
 
 #include "app/Log.h"
 
+#include <pthread.h>
+#include <sched.h>
+#include <time.h>
+
 #include <algorithm>
+#include <cctype>
 
 namespace app
 {
-Midi::Midi(Synth& synth) : synth_(synth)
+namespace
+{
+std::uint64_t nowNs() noexcept
+{
+    timespec ts {};
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return static_cast<std::uint64_t>(ts.tv_sec) * 1000000000ull + static_cast<std::uint64_t>(ts.tv_nsec);
+}
+
+std::string upper(std::string s)
+{
+    for (auto& c : s)
+        c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+    return s;
+}
+} // namespace
+
+Midi::Midi(Player& player, std::string outputs) : player_(player), selection_(upper(std::move(outputs)))
 {
     providers_.push_back(io::midi::makeAlsaRawMidi());
+    senderThread_ = std::thread([this] { sender(); });
+}
+
+bool Midi::selected(const std::string& name) const
+{
+    if (selection_.empty() || selection_ == "ALL")
+        return true;
+    if (selection_ == "NONE")
+        return false;
+    return upper(name).find(selection_) != std::string::npos;
+}
+
+bool Midi::schedule(std::uint64_t dueNs, const std::uint8_t* bytes, int size) noexcept
+{
+    Timed t {dueNs, {0, 0, 0}, static_cast<std::uint8_t>(std::clamp(size, 1, 3))};
+    for (int i = 0; i < t.size; ++i)
+        t.bytes[i] = bytes[i];
+    return timed_.push(t);
+}
+
+void Midi::write(const std::uint8_t* bytes, int size)
+{
+    // A failed write = the port is gone (unplugged): drop it, the next refresh() reopens it when it is back.
+    std::erase_if(outputs_, [&](Output& o) { return ! o.port->write(bytes, size); });
+    sent_.fetch_add(1, std::memory_order_relaxed);
+}
+
+// The sender: messages in due order (a stable order for equal times), each written when its time has come. Sleeps
+// at most 1 ms, so new messages with near due times are never late by more than that.
+void Midi::sender()
+{
+    nameThisThread("midi-out");
+    sched_param p {};
+    p.sched_priority = 60;
+    pthread_setschedparam(pthread_self(), SCHED_FIFO, &p);
+    std::vector<std::pair<std::uint64_t, Timed>> pending; // (sequence-tagged due time, message)
+    pending.reserve(4096);
+    std::uint64_t sequence = 0;
+    while (! quit_.load(std::memory_order_relaxed))
+    {
+        for (Timed t; timed_.pop(t);)
+            pending.push_back({sequence++, t});
+        std::stable_sort(pending.begin(), pending.end(), [](const auto& a, const auto& b) { return a.second.dueNs < b.second.dueNs; });
+        const std::uint64_t now = nowNs();
+        std::size_t done = 0;
+        if (! pending.empty() && pending.front().second.dueNs <= now)
+        {
+            std::lock_guard<std::mutex> lock(outMutex_);
+            while (done < pending.size() && pending[done].second.dueNs <= now)
+            {
+                write(pending[done].second.bytes, pending[done].second.size);
+                ++done;
+            }
+        }
+        pending.erase(pending.begin(), pending.begin() + static_cast<std::ptrdiff_t>(done));
+        std::uint64_t wake = now + 1000000;
+        if (! pending.empty())
+            wake = std::min(wake, std::max(now, pending.front().second.dueNs));
+        timespec ts {static_cast<time_t>(wake / 1000000000ull), static_cast<long>(wake % 1000000000ull)};
+        clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &ts, nullptr);
+    }
 }
 
 Midi::~Midi() { stop(); }
@@ -16,6 +99,8 @@ Midi::~Midi() { stop(); }
 void Midi::stop()
 {
     quit_ = true;
+    if (senderThread_.joinable())
+        senderThread_.join();
     for (auto& in : inputs_)
         if (in->thread.joinable())
             in->thread.join();
@@ -37,7 +122,7 @@ std::uint8_t Midi::indexOf(const std::string& name, bool input, bool output)
 }
 
 int Midi::inputCount() const noexcept { return static_cast<int>(inputs_.size()); }
-int Midi::outputCount() const noexcept { return static_cast<int>(outputs_.size()); }
+int Midi::outputCount() const noexcept { return static_cast<int>(outputs_.size()); } // UI thread: a snapshot
 
 void Midi::refresh(std::string* log)
 {
@@ -82,12 +167,18 @@ void Midi::refresh(std::string* log)
                 else
                     say("MIDI in FAILED: " + key + ": " + error);
             }
-            if (info.output && std::none_of(outputs_.begin(), outputs_.end(), [&](const auto& o) { return o.key == key; }))
+            bool known = false;
+            {
+                std::lock_guard<std::mutex> lock(outMutex_);
+                known = std::any_of(outputs_.begin(), outputs_.end(), [&](const auto& o) { return o.key == key; });
+            }
+            if (info.output && selected(info.name) && ! known)
             {
                 std::string error;
                 if (auto port = provider->openOutput(info, error))
                 {
                     indexOf(info.name, false, true);
+                    std::lock_guard<std::mutex> lock(outMutex_);
                     outputs_.push_back({key, std::move(port)});
                     say("MIDI out opened: " + key + " (" + info.id + ")");
                 }
@@ -136,13 +227,8 @@ void Midi::read(Input& in)
             have = 0;
             switch (type)
             {
-            case 0x90: data[1] > 0 ? synth_.noteOn(data[0], data[1]) : synth_.noteOff(data[0]); break;
-            case 0x80: synth_.noteOff(data[0]); break;
-            case 0xE0: synth_.pitchBend(static_cast<float>((data[1] << 7 | data[0]) - 8192) / 8192.0f * 2.0f); break;
-            case 0xB0:
-                if (data[0] == 123 || data[0] == 120) // all notes off / all sound off
-                    synth_.allNotesOff();
-                break;
+            case 0x90: player_.midiNote(data[0], data[1]); break;
+            case 0x80: player_.midiNote(data[0], 0); break;
             default: break;
             }
             toUi_.push({{status, data[0], data[1]}, need == 1 ? std::uint8_t {2} : std::uint8_t {3}, in.index});
@@ -158,7 +244,7 @@ void Midi::poll(std::vector<MidiMessageIn>& out)
 
 void Midi::send(const std::uint8_t* bytes, int size)
 {
-    // A failed write = the port is gone (unplugged): drop it, the next refresh() reopens it when it is back.
-    std::erase_if(outputs_, [&](Output& o) { return ! o.port->write(bytes, size); });
+    std::lock_guard<std::mutex> lock(outMutex_);
+    write(bytes, size);
 }
 } // namespace app

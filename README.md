@@ -1,44 +1,128 @@
 # Track16
 
-An interactive tracker-module player for the Pioneer DJ TORAIZ SP-16. It plays
-MOD, S3M, XM, IT and other module formats from a USB stick and turns them into
-something to perform with: pad modes for muting, looping, playing the module's
-instruments and sending channels through the SP-16's analog filter, MIDI clock
-and notes on the MIDI out, and the pattern data as "digital rain" on the
-display.
+An interactive tracker-module player for the Pioneer DJ TORAIZ SP-16. It plays MOD, S3M, XM, IT and the other
+formats [libopenmpt](https://lib.openmpt.org) supports from a USB stick and turns them into something to perform
+with: pad modes for muting, looping, playing the module's instruments and sending channels through the SP-16's
+analog filter, MIDI clock and notes on the MIDI outs, and the pattern data as "digital rain" on the display.
 
-Status: early development. The app is started from the community
-[boot menu](https://github.com/freesp16/bootmenu); nothing is installed on the
-unit and nothing is written to its internal memory.
+Status: first implementation (0.1.0). The engine is tested on a build machine (`tests/`); the unit test of the whole
+app is pending. The app is started from the community [boot menu](https://github.com/freesp16/bootmenu); nothing is
+installed on the unit and nothing is written to its internal memory.
 
-## Based on juce-app-template
+## The stick
 
-Track16 starts from freesp16's
-[juce-app-template](https://github.com/freesp16/juce-app-template), which
-provides the SP-16 hardware layer (`hw/`), the cross toolchain and the build.
-The template's own documentation is in
-[docs/template-README.md](docs/template-README.md).
-
-The template is kept as the git remote `template`. To merge its later fixes:
-
-```bash
-git pull template main
+```
+autoexec.bin        the boot menu (its release)
+track16             this app (out/track16)
+track16.conf        optional settings (below)
+modules/…           your modules, in any folders (all folders of the stick are searched)
 ```
 
-Keep changes to `hw/` small so these merges stay easy.
+Plug the stick into the running SP-16, choose **Track16** in the boot menu. **SHIFT + BACK** quits to the menu.
+Quit before pulling the stick: the menu and the app write their logs to it.
+
+## Screens
+
+- **LIBRARY**: every module on the stick. Turn SELECT to choose, push SELECT to play.
+- **PLAYER**: the pattern rain. The rows fall onto the playhead line, flare in their instrument's colour as they
+  cross it, and fade into a trail. Column headers show each channel's level; muted channels are grey, filtered ones
+  orange. The context bar shows order, row, speed, BPM, the title and the pad modes.
+
+BACK switches between them (HOME: the library).
+
+## Controls
+
+| Control | Action |
+|---|---|
+| PLAY | Play / pause (MIDI Start/Continue/Stop follow) |
+| STOP | Stop and rewind. SHIFT + STOP also clears mutes, solos and the master filter |
+| SELECT turn / push | Library: choose / play. Player: the instrument for the PLAY pads / back to the library |
+| SCENE / PATTERN | Previous / next module. With SHIFT: the PLAY pads' octave |
+| STEP 1–16 | Jump to order 1–16 of the current order page; the jump is quantized (BAR keys). SHIFT + STEP n: order page n |
+| BAR 1 / 2 / 3 | Jumps at the pattern end / on the beat / at once |
+| BAR 4 | Pattern loop on/off |
+| REC | MIDI notes out on/off (module channels 1–16 → MIDI channels 1–16) |
+| ANALOG FILTER ACTIVE | The whole mix through the analog filter |
+| Knobs 1–6 | TEMPO (SHIFT: 100 %), PITCH (SHIFT: 0), STEREO separation, INTERPolation, GAIN (SHIFT: 0 dB), VIEW (rain density) |
+| MAIN VOLUME | Output level |
+| Touch strip | Tempo bend ±8 % while touched |
+| SHIFT + BACK | Quit to the boot menu |
+
+### Pad modes (the four keys below the pads)
+
+| Key | Mode | Pad | SHIFT + pad |
+|---|---|---|---|
+| TRACK | **FILTER** | Hold: that channel through the analog filter | Keep it there (latch) |
+| MUTE | **MUTE** | Mute on/off | Solo on/off |
+| SLICE | **LOOP** | Hold: loop 1, 2, 3, 4, 6, 8, 12, 16, 24, 32, 48, 64 rows (pads 1–12); release returns to where the song would be | Keep the loop running |
+| SCALE | **PLAY** | Play the selected instrument chromatically (pad 1 = C-5) | Select instrument |
+| SHIFT + SCALE | **KIT** | Pads 1–16 play instruments 1–16 at their standard pitch | — |
+
+Pressing the active mode's key again shows the next 16 channels / instruments on the pads.
+
+The analog filter's LP cutoff and resonance are analog knobs on the unit: hold a FILTER pad with one hand and turn
+them with the other. HP cutoff and drive are read by the panel. Track16 measures the filter loop's latency at start
+and delays the unfiltered channels by it, so both paths stay aligned.
+
+## MIDI
+
+- **Clock**: 24 pulses per beat from the module's actual row timing (`rows_per_beat`, default 4), Start / Stop /
+  Continue, and Song Position Pointer after jumps. Sent to the ports `midi_out` selects.
+- **Notes** (REC, or `midi_notes=1`): the notes of module channels 1–16 on MIDI channels 1–16, velocity from the
+  volume column. Muting a channel ends its MIDI note.
+- **In**: notes play the selected instrument.
+
+All MIDI out is timed against the audio output (`midi_offset_ms` adjusts it per setup).
+
+## Settings (`track16.conf` on the stick)
+
+```
+modules=/media/usb1/sda1/modules   where to look (default: the whole stick)
+autoplay=0           1: play the first module at start
+audio_period=128     audio period in frames (latency); 256 if you hear dropouts
+stereo=100           stereo separation, 0…200 %
+interp=4             interpolation taps: 1 none, 2 linear, 4 cubic, 8 sinc
+rows_per_beat=4      for the MIDI clock and beat-quantized jumps
+midi_out=all         all, din, usb or none
+midi_clock=1
+midi_notes=0
+midi_offset_ms=0
+filter_loop=1        the analog filter loop (0: off)
+filter_latency=0     fixed loop latency in frames (0: measure at start)
+stat=10              seconds between STAT lines in bootmenu.log
+```
 
 ## Build
 
 ```bash
 git submodule update --init --depth 1   # JUCE 9.0.6
-scripts/build-unit.sh                   # → out/track16 for the USB stick
+scripts/build-unit.sh                   # → out/track16 for the stick
+scripts/test-host.sh ../modules         # engine tests with a folder of modules
 ```
 
-Copy `out/track16` next to the boot menu's `autoexec.bin` on a FAT32 stick.
-See the template documentation for settings and the stick layout.
+`scripts/build-unit.sh` needs Docker (Colima works); the first run builds the cross toolchain (about 30 minutes).
+
+## Code
+
+| Path | What it is |
+|---|---|
+| `app/Player.*` | The engine: libopenmpt on the audio thread, pad modes, quantized jumps, the stutter loop, the filter routes, MIDI clock and notes |
+| `app/Song.*` | Loading a module: the libopenmpt instances (two with the filter loop: "dry" and "wet" stems) and a snapshot of the pattern data |
+| `app/Screen.*` | The UI: library, player, context bar, knob strip, the rain, the controls and the lamps |
+| `app/GlDisplay.*` | OpenGL ES output: the rain's rectangles and glyphs (an atlas built from the app font) under the UI |
+| `app/Midi.*` | MIDI in and the timed MIDI out |
+| `app/Library.*` | The module files on the stick |
+| `hw/` | The SP-16 hardware layer from juce-app-template (keep changes small) |
+| `third_party/libopenmpt` | libopenmpt 0.8.10 (see `VENDORED.md`) |
+| `tests/` | Host tests of the engine |
+
+## Based on juce-app-template
+
+Track16 starts from freesp16's [juce-app-template](https://github.com/freesp16/juce-app-template), kept as the git
+remote `template` (`git pull template main` merges its fixes). Its documentation is in
+[docs/template-README.md](docs/template-README.md).
 
 ## Licence
 
-Track16 is GPL-3.0 (see `LICENSE`). JUCE is used under its free licence,
-AGPLv3. libopenmpt (to be added) is BSD-3-Clause. Distributed binaries come
-with their complete source.
+GPL-3.0 (see `LICENSE`). JUCE is used under its free licence, AGPLv3. libopenmpt is BSD-3-Clause. Distributed
+binaries come with their complete source.

@@ -1,5 +1,7 @@
 #include "app/GlDisplay.h"
 
+#include "app/Theme.h"
+
 #include <EGL/egl.h>
 #include <GLES2/gl2.h>
 
@@ -36,6 +38,28 @@ const char* const kFragmentFlat = R"(
 precision mediump float;
 varying vec4 vColour;
 void main() { gl_FragColor = vColour; }
+)";
+
+// Glyphs from the atlas (white on transparent, premultiplied): the vertex colour times the atlas coverage.
+const char* const kVertexGlyph = R"(
+attribute vec2 aPos;
+attribute vec4 aColour;
+attribute vec2 aUv;
+uniform vec2 uScreen;
+varying vec4 vColour;
+varying vec2 vUv;
+void main() {
+    vColour = aColour;
+    vUv = aUv;
+    gl_Position = vec4(aPos.x / uScreen.x * 2.0 - 1.0, 1.0 - aPos.y / uScreen.y * 2.0, 0.0, 1.0);
+}
+)";
+const char* const kFragmentGlyph = R"(
+precision mediump float;
+varying vec4 vColour;
+varying vec2 vUv;
+uniform sampler2D uAtlas;
+void main() { gl_FragColor = vColour * texture2D(uAtlas, vUv).a; }
 )";
 
 // The UI texture over the whole screen. It holds JUCE's premultiplied ARGB words, i.e. bytes B, G, R, A: swizzled.
@@ -78,6 +102,7 @@ GLuint link(const char* vs, const char* fs, std::string& error)
     glAttachShader(p, f);
     glBindAttribLocation(p, 0, "aPos");
     glBindAttribLocation(p, 1, "aColour");
+    glBindAttribLocation(p, 2, "aUv");
     glLinkProgram(p);
     glDeleteShader(v);
     glDeleteShader(f);
@@ -92,6 +117,13 @@ struct Vertex
 {
     float x, y, r, g, b, a;
 };
+struct GlyphVertex
+{
+    float x, y, r, g, b, a, u, v;
+};
+
+// The atlas: printable ASCII 32…126 in 16 × 6 cells of kCellW × kCellH texels.
+constexpr int kCellW = 16, kCellH = 28, kAtlasW = 256, kAtlasH = 256;
 
 // After the app quits, the framebuffer may still show its second buffer: pan back so whatever runs next (the boot menu)
 // starts from a known state.
@@ -135,8 +167,10 @@ struct GlDisplay::Impl
     EGLSurface surface = EGL_NO_SURFACE;
     EGLContext context = EGL_NO_CONTEXT;
     EGLint width = 0, height = 0;
-    GLuint flat = 0, ui = 0, texture = 0;
-    GLint flatScreen = -1, uiSampler = -1;
+    GLuint flat = 0, ui = 0, texture = 0, glyphs = 0, atlas = 0;
+    GLint flatScreen = -1, uiSampler = -1, glyphScreen = -1, glyphSampler = -1;
+    std::vector<GlyphVertex> glyphVertices;
+    std::vector<std::uint16_t> quadIndices;
     juce::Component* root = nullptr;
     DirtyAreas* dirty = nullptr; // owned by the root component
     juce::Image image {juce::Image::ARGB, Screen::kWidth, Screen::kHeight, true, juce::SoftwareImageType()};
@@ -179,38 +213,113 @@ struct GlDisplay::Impl
         areas.clear();
     }
 
-    // 3: the scope, a triangle strip along the trace, offset along each point's normal; a soft wide pass, then the
-    // core line. Quiet signals are magnified up to 4× so a single soft note stays visible.
-    void drawScope(const SceneInput& s, const float* scope, int n)
+    static void unpack(std::uint32_t argb, float& r, float& g, float& b, float& a) // → premultiplied
     {
-        const auto box = s.scope.reduced(0, 4);
-        float peak = 0.0f;
-        for (int i = 0; i < n; ++i)
-            peak = std::max(peak, std::fabs(scope[i]));
-        const float mid = box.getCentreY(), amp = box.getHeight() * 0.5f / std::max(0.25f, std::min(1.0f, peak));
-        const auto y = [&](int k) { return mid - amp * scope[std::clamp(k, 0, n - 1)]; };
+        a = static_cast<float>((argb >> 24) & 255) / 255.0f;
+        r = static_cast<float>((argb >> 16) & 255) / 255.0f * a;
+        g = static_cast<float>((argb >> 8) & 255) / 255.0f * a;
+        b = static_cast<float>(argb & 255) / 255.0f * a;
+    }
+
+    // 3a: flat rectangles (two triangles each).
+    void drawRects(const std::vector<SceneRect>& rects)
+    {
+        if (rects.empty())
+            return;
+        vertices.clear();
+        for (const auto& q : rects)
+        {
+            float r, g, b, a;
+            unpack(q.argb, r, g, b, a);
+            const Vertex v[4] = {{q.x, q.y, r, g, b, a}, {q.x + q.w, q.y, r, g, b, a}, {q.x, q.y + q.h, r, g, b, a}, {q.x + q.w, q.y + q.h, r, g, b, a}};
+            for (int i : {0, 1, 2, 1, 3, 2})
+                vertices.push_back(v[i]);
+        }
         glUseProgram(flat);
         glUniform2f(flatScreen, kW, kH);
-        glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
-        for (const auto& [halfWidth, alpha] : {std::pair {3.0f, 0.16f}, std::pair {0.9f, 1.0f}})
+        glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, sizeof(Vertex), &vertices[0].x);
+        glVertexAttribPointer(1, 4, GL_FLOAT, GL_FALSE, sizeof(Vertex), &vertices[0].r);
+        glEnableVertexAttribArray(0);
+        glEnableVertexAttribArray(1);
+        glDrawArrays(GL_TRIANGLES, 0, static_cast<GLsizei>(vertices.size()));
+        glDisableVertexAttribArray(1);
+    }
+
+    // 3b: glyphs from the atlas, four vertices per glyph and a shared index list, in batches of ≤ 16384 glyphs.
+    void drawGlyphs(const std::vector<SceneGlyph>& list)
+    {
+        if (list.empty() || glyphs == 0)
+            return;
+        glUseProgram(glyphs);
+        glUniform2f(glyphScreen, kW, kH);
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, atlas);
+        glUniform1i(glyphSampler, 0);
+        constexpr std::size_t kBatch = 16384;
+        for (std::size_t from = 0; from < list.size(); from += kBatch)
         {
-            vertices.clear();
-            const float r = s.trace.getFloatRed() * alpha, g = s.trace.getFloatGreen() * alpha, b = s.trace.getFloatBlue() * alpha;
-            for (int i = 0; i < n; ++i)
+            const std::size_t count = std::min(kBatch, list.size() - from);
+            glyphVertices.clear();
+            for (std::size_t k = from; k < from + count; ++k)
             {
-                const float x = box.getX() + box.getWidth() * static_cast<float>(i) / static_cast<float>(n - 1);
-                const float dx = 2.0f * box.getWidth() / static_cast<float>(n - 1), dy = y(i + 1) - y(i - 1);
-                const float len = std::sqrt(dx * dx + dy * dy), nx = -dy / len * halfWidth, ny = dx / len * halfWidth;
-                vertices.push_back({x + nx, y(i) + ny, r, g, b, alpha});
-                vertices.push_back({x - nx, y(i) - ny, r, g, b, alpha});
+                const auto& q = list[k];
+                const int index = std::clamp(static_cast<int>(q.ch) - 32, 0, 94);
+                const float u0 = static_cast<float>((index % 16) * kCellW) / kAtlasW, v0 = static_cast<float>((index / 16) * kCellH) / kAtlasH;
+                const float u1 = u0 + static_cast<float>(kCellW) / kAtlasW, v1 = v0 + static_cast<float>(kCellH) / kAtlasH;
+                float r, g, b, a;
+                unpack(q.argb, r, g, b, a);
+                glyphVertices.push_back({q.x, q.y, r, g, b, a, u0, v0});
+                glyphVertices.push_back({q.x + q.w, q.y, r, g, b, a, u1, v0});
+                glyphVertices.push_back({q.x, q.y + q.h, r, g, b, a, u0, v1});
+                glyphVertices.push_back({q.x + q.w, q.y + q.h, r, g, b, a, u1, v1});
             }
-            glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, sizeof(Vertex), &vertices[0].x);
-            glVertexAttribPointer(1, 4, GL_FLOAT, GL_FALSE, sizeof(Vertex), &vertices[0].r);
+            glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, sizeof(GlyphVertex), &glyphVertices[0].x);
+            glVertexAttribPointer(1, 4, GL_FLOAT, GL_FALSE, sizeof(GlyphVertex), &glyphVertices[0].r);
+            glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, sizeof(GlyphVertex), &glyphVertices[0].u);
             glEnableVertexAttribArray(0);
             glEnableVertexAttribArray(1);
-            glDrawArrays(GL_TRIANGLE_STRIP, 0, static_cast<GLsizei>(vertices.size()));
+            glEnableVertexAttribArray(2);
+            glDrawElements(GL_TRIANGLES, static_cast<GLsizei>(count * 6), GL_UNSIGNED_SHORT, quadIndices.data());
         }
         glDisableVertexAttribArray(1);
+        glDisableVertexAttribArray(2);
+    }
+
+    // The glyph atlas, drawn once with JUCE (the app's Inter font, centred in each cell).
+    void buildAtlas(const juce::Font& font)
+    {
+        juce::Image img(juce::Image::ARGB, kAtlasW, kAtlasH, true, juce::SoftwareImageType());
+        {
+            juce::Graphics g(img);
+            g.setColour(juce::Colours::white);
+            g.setFont(font);
+            for (int c = 32; c < 127; ++c)
+            {
+                const int i = c - 32;
+                const juce::Rectangle<int> cell((i % 16) * kCellW, (i / 16) * kCellH, kCellW, kCellH);
+                g.drawFittedText(juce::String::charToString(static_cast<juce::juce_wchar>(c)), cell, juce::Justification::centred, 1, 0.5f);
+            }
+        }
+        const juce::Image::BitmapData bits(img, juce::Image::BitmapData::readOnly);
+        std::vector<std::uint8_t> rgba(static_cast<std::size_t>(kAtlasW * kAtlasH * 4));
+        for (int y = 0; y < kAtlasH; ++y)
+            for (int x = 0; x < kAtlasW; ++x)
+            {
+                const auto px = bits.getPixelColour(x, y);
+                const auto o = static_cast<std::size_t>((y * kAtlasW + x) * 4);
+                rgba[o] = rgba[o + 1] = rgba[o + 2] = 255;
+                rgba[o + 3] = px.getAlpha();
+            }
+        glGenTextures(1, &atlas);
+        glBindTexture(GL_TEXTURE_2D, atlas);
+        for (auto [k, v] : {std::pair {GL_TEXTURE_MIN_FILTER, GL_LINEAR}, std::pair {GL_TEXTURE_MAG_FILTER, GL_LINEAR},
+                            std::pair {GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE}, std::pair {GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE}})
+            glTexParameteri(GL_TEXTURE_2D, k, v);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, kAtlasW, kAtlasH, 0, GL_RGBA, GL_UNSIGNED_BYTE, rgba.data());
+        quadIndices.clear();
+        for (std::uint16_t q = 0; q < 16384; ++q)
+            for (int k : {0, 1, 2, 1, 3, 2})
+                quadIndices.push_back(static_cast<std::uint16_t>(q * 4 + k));
     }
 };
 
@@ -273,8 +382,12 @@ bool GlDisplay::open(const platform::RendererEnv& env, std::string_view flavour,
     // Shaders and the UI texture (non-power-of-two is fine with clamp-to-edge and no mipmaps).
     d.flat = link(kVertexPixels, kFragmentFlat, error);
     d.ui = link(kVertexFull, kFragmentUi, error);
-    if (d.flat == 0 || d.ui == 0)
+    d.glyphs = link(kVertexGlyph, kFragmentGlyph, error);
+    if (d.flat == 0 || d.ui == 0 || d.glyphs == 0)
         return false;
+    d.glyphScreen = glGetUniformLocation(d.glyphs, "uScreen");
+    d.glyphSampler = glGetUniformLocation(d.glyphs, "uAtlas");
+    d.buildAtlas(theme::font(theme::Text::ValueS).withHeight(22.0f));
     d.flatScreen = glGetUniformLocation(d.flat, "uScreen");
     d.uiSampler = glGetUniformLocation(d.ui, "uUi");
     glGenTextures(1, &d.texture);
@@ -302,7 +415,7 @@ bool GlDisplay::open(const platform::RendererEnv& env, std::string_view flavour,
     return true;
 }
 
-bool GlDisplay::draw(const SceneInput& s, const float* scope, int scopeSize)
+bool GlDisplay::draw(const SceneInput& s)
 {
     auto& d = *impl_;
     d.updateUi();
@@ -314,8 +427,13 @@ bool GlDisplay::draw(const SceneInput& s, const float* scope, int scopeSize)
     glClear(GL_COLOR_BUFFER_BIT);
     glViewport((d.width - w) / 2, (d.height - h) / 2, w, h);
     glEnable(GL_BLEND);
-    if (scopeSize > 1)
-        d.drawScope(s, scope, scopeSize);
+    glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA); // everything is premultiplied
+    if (s.rects != nullptr)
+        d.drawRects(*s.rects);
+    if (s.glyphs != nullptr)
+        d.drawGlyphs(*s.glyphs);
+    if (s.overlay != nullptr)
+        d.drawRects(*s.overlay);
     static const float quad[] = {-1, -1, 1, -1, -1, 1, 1, 1};
     glUseProgram(d.ui);
     glActiveTexture(GL_TEXTURE0);

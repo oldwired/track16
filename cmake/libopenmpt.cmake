@@ -4,7 +4,7 @@
 # external libraries: zlib, mpg123 and libvorbis are replaced by the bundled miniz, minimp3 and stb_vorbis, so
 # compressed formats (MDZ, MO3 with MP3/Vorbis samples, ...) still load. Update: see third_party/libopenmpt/VENDORED.md.
 
-set(OPENMPT_DIR ${CMAKE_SOURCE_DIR}/third_party/libopenmpt)
+set(OPENMPT_DIR ${CMAKE_CURRENT_LIST_DIR}/../third_party/libopenmpt)
 
 file(GLOB OPENMPT_CXX_SOURCES CONFIGURE_DEPENDS
     ${OPENMPT_DIR}/src/openmpt/all/*.cpp

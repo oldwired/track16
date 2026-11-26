@@ -1,20 +1,26 @@
-// The app: start the hardware, then one loop per display frame (60 Hz).
+// Track16: start the hardware, then one loop per display frame (60 Hz).
 //
-//   1. the platform (the unit, or a Linux desktop) and the settings
-//   2. JUCE (no windows: see app/Theme.h), the synth on the codec, the panel / strip / touch, the lamps, MIDI, the screen
+//   1. the platform and the settings; all CPU cores (the boot menu starts apps pinned to core 0)
+//   2. JUCE (no windows: see app/Theme.h), the player on the codec, the panel / strip / touch, the lamps, MIDI, the
+//      screen; then the module library on the stick
 //   3. every frame: control events → screen, MIDI → screen, screen.frame(), the lamps, GlDisplay::draw()
-//   4. quit on SHIFT + BACK, ↩ on the screen, the desktop window's close button or SIGTERM (the boot menu stops apps
-//      that way); exit code 0 brings the boot menu back
+//   4. quit on SHIFT + BACK or SIGTERM (the boot menu stops apps that way); exit code 0 brings the boot menu back
 //
-// Settings: key=value lines in the platform's settings file (the unit: <stick>/<name>-data/<name>/<name>.conf; a
-// desktop: ~/.config/<name>/<name>.conf), overridden by <PREFIX>_<KEY> environment variables (the boot menu exports the
-// lines of <stick>/<name>.conf that way). The app reads: audio=0|1, midi=0|1, tone=0|1, tone_port=main|out34|…,
-// seq=0|1, stat=<seconds>; the platform reads its own (hw/imx6/Imx6Platform.cpp, hw/linux/LinuxPlatform.cpp).
+// Settings: key=value lines in <stick>/track16.conf (the boot menu exports them as TRACK16_<KEY>) or in the data
+// folder's track16.conf. Track16 reads:
+//   audio=0|1  midi=0|1  stat=<seconds>
+//   modules=<folder>            where to look for modules (default: the stick)
+//   autoplay=0|1                play the first module at start
+//   stereo=<0…200>  interp=1|2|4|8   libopenmpt's stereo separation (%) and interpolation taps
+//   rows_per_beat=<n>           for the MIDI clock and the beat quantize (default 4)
+//   midi_out=all|din|usb|none   midi_clock=0|1  midi_notes=0|1  midi_offset_ms=<ms>
+//   filter_latency=<frames>     the analog filter loop's latency (default: measured at start)
+// and passes the rest to the platform (audio_period, audio_periods, filter_loop, …: hw/imx6/Imx6Platform.cpp).
 #include "app/GlDisplay.h"
 #include "app/Log.h"
 #include "app/Midi.h"
+#include "app/Player.h"
 #include "app/Screen.h"
-#include "app/Synth.h"
 #include "app/Theme.h"
 
 #include "Platform.h"
@@ -22,6 +28,7 @@
 
 #include <libopenmpt/libopenmpt.hpp>
 
+#include <sched.h>
 #include <signal.h>
 #include <unistd.h>
 
@@ -48,7 +55,10 @@ std::string trim(std::string s)
 // Defaults, then the file's key=value lines, then <PREFIX>_<KEY> variables (keys are lower case).
 platform::Settings loadSettings(const std::string& file)
 {
-    platform::Settings s {{"audio", "1"}, {"midi", "1"}, {"tone", "0"}, {"tone_port", "main"}, {"seq", "0"}, {"stat", "10"}};
+    platform::Settings s {{"audio", "1"}, {"midi", "1"}, {"stat", "10"}, {"filter_loop", "1"}, {"audio_period", "128"},
+                          {"audio_periods", "3"}, {"stereo", "100"}, {"interp", "4"}, {"rows_per_beat", "4"},
+                          {"midi_out", "all"}, {"midi_clock", "1"}, {"midi_notes", "0"}, {"midi_offset_ms", "0"},
+                          {"autoplay", "0"}, {"modules", ""}, {"filter_latency", "0"}};
     std::ifstream in(file);
     for (std::string line; std::getline(in, line);)
         if (const auto eq = line.find('='); eq != std::string::npos && trim(line).rfind('#', 0) != 0)
@@ -77,6 +87,25 @@ void logMidi(const std::string& lines)
         logLine("%s", lines.substr(a, (b = lines.find('\n', a)) - a).c_str());
 }
 
+int number(const platform::Settings& s, const char* key, int fallback)
+{
+    const auto it = s.find(key);
+    return it == s.end() || it->second.empty() ? fallback : std::atoi(it->second.c_str());
+}
+
+// Every core for this process (the boot menu's runner inherits init's mask 0x1); the audio thread then pins itself
+// to the last core (app/Player.cpp).
+void useAllCores()
+{
+    const long cpus = sysconf(_SC_NPROCESSORS_ONLN);
+    cpu_set_t set;
+    CPU_ZERO(&set);
+    for (long i = 0; i < cpus && i < CPU_SETSIZE; ++i)
+        CPU_SET(static_cast<int>(i), &set);
+    const bool ok = sched_setaffinity(0, sizeof set, &set) == 0;
+    logLine("CPU %ld cores, affinity %s", cpus, ok ? "all" : "unchanged");
+}
+
 int run()
 {
     installCrashLog();
@@ -94,19 +123,20 @@ int run()
     logLine("LIBOPENMPT %s", openmpt::string::get("library_version").c_str());
     logLine("PLATFORM %s", machine->describe().c_str());
     logLine("SETTINGS file=%s", machine->paths().settingsFile.c_str());
+    useAllCores();
 
     // 2. JUCE and the parts.
     juce::ScopedJuceInitialiser_GUI juce; // this thread is JUCE's message thread
     theme::installFonts();
     struct FontsRelease { ~FontsRelease() { theme::releaseFonts(); } } fontsRelease; // after the screen is gone
 
-    Synth synth;
-    synth.toneOn = settings["tone"] == "1";
-    synth.seqRunning = settings["seq"] == "1";
-    static const char* const jacks[] = {"main", "out34", "out56", "out78", "phones"};
-    for (int i = 0; i < 5; ++i)
-        if (settings["tone_port"] == jacks[i])
-            synth.tonePort = i;
+    Player player;
+    player.stereoSeparation = number(settings, "stereo", 100);
+    player.interpolation = number(settings, "interp", 4);
+    player.rowsPerBeat = number(settings, "rows_per_beat", 4);
+    player.midiClock = settings["midi_clock"] == "1";
+    player.midiNotes = settings["midi_notes"] == "1";
+    player.midiOffsetMs = number(settings, "midi_offset_ms", 0);
 
     std::vector<std::unique_ptr<platform::AudioDevice>> audioDevices;
     platform::AudioDevice* audio = nullptr;
@@ -116,17 +146,19 @@ int run()
         for (auto& device : audioDevices)
         {
             std::string info;
-            if (device->start(platform::AudioConfig {}, synth, info))
+            if (device->start(platform::AudioConfig {}, player, info))
             {
                 logLine("AUDIO ok %s", info.c_str());
                 audio = device.get();
+                const auto st = device->stats();
+                player.audioLatencyFrames = static_cast<int>(st.periodFrames * static_cast<unsigned>(number(settings, "audio_periods", 3)));
                 break;
             }
             logLine("AUDIO %s unavailable: %s", std::string(device->id()).c_str(), info.c_str());
         }
     }
 
-    auto inputs = machine->controlSources({&synth}); // pad hits and strip moves go straight to the synth
+    auto inputs = machine->controlSources({&player}); // pad hits and strip moves go straight to the player
     for (auto& input : inputs)
     {
         std::string info;
@@ -135,7 +167,8 @@ int run()
     }
     auto lamps = machine->lamps(); // null on a desktop
 
-    Midi midi(synth);
+    Midi midi(player, settings["midi_out"]);
+    player.setMidi(&midi);
     if (settings["midi"] == "1")
     {
         std::string log;
@@ -143,7 +176,20 @@ int run()
         logMidi(log);
     }
 
-    Screen screen(synth, midi);
+    ScreenConfig screenConfig;
+    if (! settings["modules"].empty())
+        screenConfig.roots.push_back(settings["modules"]);
+    if (char cwd[512]; getcwd(cwd, sizeof cwd) != nullptr) // the boot menu starts apps in the stick's root
+        screenConfig.roots.push_back(cwd);
+    for (const auto& m : machine->paths().usbMounts)
+        screenConfig.roots.push_back(m);
+    screenConfig.roots.push_back("/media/usb1/sda1");
+    screenConfig.autoplay = settings["autoplay"] == "1";
+    screenConfig.stereoSeparation = player.stereoSeparation.load();
+    screenConfig.interpolation = player.interpolation.load();
+    if (const int latency = number(settings, "filter_latency", 0); latency > 0)
+        player.setFixedLatency(latency);
+    Screen screen(player, midi, screenConfig);
     screen.onQuit = [] { platform::requestQuit(); };
     std::string error;
     auto display = machine->display(error); // the platform's display handles
@@ -157,12 +203,12 @@ int run()
     logLine("DISPLAY %s", gl.describe().c_str());
     screen.setStatus({std::string(machine->id()), std::string("gl-") + flavour,
                       audio != nullptr ? std::string(audio->id()) : std::string("no audio")});
+    screen.start();
 
     // 3. The frame loop, paced by the display (eglSwapBuffers waits for vsync).
     std::vector<io::ControlEvent> events;
     std::vector<MidiMessageIn> midiIn;
     io::LampFrame lampFrame;
-    float scope[512];
     const double statMs = 1000.0 * std::atof(settings["stat"].c_str());
     double lastStat = start, lastMidiScan = start, fpsFrom = start;
     long frames = 0, fpsFrames = 0;
@@ -197,8 +243,7 @@ int run()
             screen.lamps(lampFrame, now);
             io::apply(lampFrame, now, io::LampBrightness::Normal, *lamps); // sent on change (+ a 4 Hz heartbeat)
         }
-        synth.scope(scope, 512);
-        if (! gl.draw(screen.scene(now), scope, 512))
+        if (! gl.draw(screen.scene(now)))
         {
             logLine("FATAL the display surface is gone");
             break;
@@ -220,9 +265,12 @@ int run()
         if (statMs > 0 && now - lastStat >= statMs)
         {
             const auto st = audio != nullptr ? audio->stats() : platform::AudioStats {};
-            logLine("STAT fps=%.0f dsp=%.1f%% dsp_max=%.1f%% xruns=%llu voices=%d midi_in=%d midi_out=%d", static_cast<double>(fps),
-                    static_cast<double>(synth.loadAverage() * 100), static_cast<double>(synth.takeLoadMax() * 100),
-                    static_cast<unsigned long long>(st.xruns), synth.activeVoices(), midi.inputCount(), midi.outputCount());
+            const auto pos = player.position();
+            logLine("STAT fps=%.0f dsp=%.1f%% dsp_max=%.1f%% xruns=%llu playing=%d order=%d row=%d route=%d loop_latency=%d%s midi_in=%d midi_out=%d midi_sent=%d",
+                    static_cast<double>(fps), static_cast<double>(player.loadAverage() * 100), static_cast<double>(player.takeLoadMax() * 100),
+                    static_cast<unsigned long long>(st.xruns), player.playing() ? 1 : 0, pos.order, pos.row, static_cast<int>(player.route()),
+                    player.latencyFrames(), player.stems() ? (player.latencyMeasured() ? " (measured)" : " (fallback)") : " (no loop)",
+                    midi.inputCount(), midi.outputCount(), midi.sentCount());
             lastStat = now;
         }
     }
