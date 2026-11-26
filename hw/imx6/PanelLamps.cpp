@@ -127,6 +127,6 @@ void PanelLamps::flush()
     frame_.finish();
     bus_->publish(frame_);
     if (board_)
-        board_->setActive(active_);
+        board_->setInsert(insert_);
 }
 } // namespace platform::imx6::panel

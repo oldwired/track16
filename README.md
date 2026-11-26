@@ -44,7 +44,7 @@ An interactive map of the panel with every control: [docs/panel.html](docs/panel
 | BAR 1 / 2 / 3 | Jumps at the pattern end / on the beat / on the next row |
 | BAR 4 | Pattern loop on/off |
 | REC | MIDI notes out on/off (module channels 1–16 → MIDI channels 1–16) |
-| ANALOG FILTER ACTIVE | The whole mix through the analog filter |
+| ANALOG FILTER ACTIVE | The whole mix through the analog filter (the board in the main output's path) |
 | Knobs 1–6 | TEMPO (SHIFT: 100 %), PITCH (SHIFT: 0), STEREO separation, INTERPolation, GAIN (SHIFT: 0 dB), VIEW (rain density) |
 | MAIN VOLUME | Output level |
 | Touch strip | Acts by its mode while touched (below); HOLD keeps the last value after you let go |
@@ -65,9 +65,15 @@ An interactive map of the panel with every control: [docs/panel.html](docs/panel
 Pressing the active mode's key again shows the next 16 channels / instruments on the pads.
 
 The analog filter's LP cutoff and resonance are analog knobs on the unit: hold a FILTER pad with one hand and turn
-them with the other. HP cutoff is read by the panel and sets the board's high-pass. DRIVE is a digital gain (as in the
-stock firmware) on what goes into the filter: the saturation is the analog board being driven hot. OVER lights when
-the driven send peaks within 1 dB of the send DAC's full scale; above it the send clips digitally.
+them with the other. HP cutoff is read by the panel and sets the board's high-pass.
+
+The filter board has two ways in, chosen by its select line. **ANALOG FILTER ACTIVE** puts the board in the main
+output's path: the whole mix goes through the filter on its way to MAIN OUT, with no latency (PHONES stays
+unfiltered: it has its own DAC). **FILTER pads** use the send/return loop instead: the held channels go out on the
+filter send and come back on the return, the rest of the mix stays clean. DRIVE is a digital gain (as in the stock
+firmware) on what goes into the filter, the main mix with ACTIVE or the send with FILTER pads; the saturation is the
+analog board driven hot. OVER lights when that signal peaks above 90 % of its DAC's full scale (with ACTIVE, the main
+DAC has no headroom: at high drive the mix saturates digitally before the board).
 
 Track16 measures the filter loop's latency at start (ANALOG FILTER ACTIVE lights up for a moment; nothing plays until
 it is done) and delays the unfiltered channels by it, so both paths stay aligned. The result is shown and logged

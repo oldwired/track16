@@ -293,26 +293,37 @@ void testModule(const LibraryEntry& e)
     rig.run(0.05);
     std::printf("  filter: channels rms %.3f, master rms %.3f\n", filtered, master);
 
-    // DRIVE: the send ×4 at full drive (+12 dB), OVER from the driven send only.
+    // DRIVE. Channels route: the send ×4 at full drive (+12 dB). Master route: nothing on the send (the board filters
+    // the main path), the main output driven. OVER only while something is driven into the filter.
     {
-        auto sendRms = [&](int drive) {
+        auto run1 = [&](int drive, double& mainRms) {
             rig.player.drive = drive;
             rig.player.jump(0, Quantize::Now);
             rig.run(0.2);
             rig.sendEnergy = 0;
-            rig.run(1.0);
+            mainRms = rig.rms(1.0);
             return std::sqrt(rig.sendEnergy / kRate);
         };
+        double m0 = 0, m1 = 0, mm0 = 0, mm1 = 0;
+        rig.player.padMode = static_cast<int>(PadMode::Filter);
+        rig.pad(0);
+        const double s0 = run1(0, m0), s1 = run1(1023, m1);
+        rig.release(0);
+        rig.run(0.05);
+        if (s0 > 1e-3)
+            CHECK(s1 / s0 > 3.0 && s1 / s0 < 5.0, "drive ratio %.2f on the send (want about 4)", s1 / s0);
         rig.player.masterFilter = true;
-        const double s0 = sendRms(0), s1 = sendRms(1023);
+        const double ms0 = run1(0, mm0), ms1 = run1(1023, mm1);
         const float overAtFull = rig.player.overLevel();
+        CHECK(ms0 < 1e-6 && ms1 < 1e-6, "master route sends %.4f / %.4f (want nothing: the main path is filtered)", ms0, ms1);
+        if (mm0 > 1e-3)
+            CHECK(mm1 > mm0 * 1.3, "master drive: main rms %.3f -> %.3f", mm0, mm1);
         rig.player.drive = 0;
         rig.player.masterFilter = false;
         rig.run(0.8);
-        if (s0 > 1e-3)
-            CHECK(s1 / s0 > 3.0 && s1 / s0 < 5.0, "drive ratio %.2f (want about 4)", s1 / s0);
         CHECK(! rig.player.over(), "OVER with no route on (level %.2f)", static_cast<double>(rig.player.overLevel()));
-        std::printf("  drive: send rms %.3f → %.3f at full drive, OVER level %.2f\n", s0, s1, static_cast<double>(overAtFull));
+        std::printf("  drive: send rms %.3f -> %.3f, master main rms %.3f -> %.3f, OVER level %.2f\n", s0, s1, mm0, mm1,
+                    static_cast<double>(overAtFull));
     }
 
     // The strip. REPEAT: the top segment loops 1 row, the bottom one 16 (or what is left of the pattern); release returns.

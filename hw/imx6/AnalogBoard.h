@@ -1,20 +1,23 @@
-// The analog filter board's digital controls (/dev/gpiodrv and /dev/dac_spi4.0). Ported from freesp16's AnalogBoard,
-// which corrected the template's select polarity and DAC handling on the unit (freesp16 160f075, a492146).
+// The analog filter board's digital controls (/dev/gpiodrv and /dev/dac_spi4.0). The DAC handling and the limiter come
+// from freesp16's AnalogBoard; the select line's meaning was found on the unit (Track16 test 2026-11-26).
 //
 //   filter select  GPIO5_IO05 "SEL_xDSF/THRU": the vendor GPIO driver, one byte per line at offset (bank − 1)·32 +
 //                  number = 133 (seek, then write; never read(): the driver turns the line into an input first).
-//                  ACTIVE LOW: 0 = the filter in the loop, 1 = THRU. Low while ANALOG FILTER ACTIVE is lit (the app
-//                  lights it while a route or the latency measurement uses the loop), high otherwise.
+//                  1 = MAIN INSERT: the main DAC goes through the filter to MAIN OUT (the filter output also reaches
+//                      the return ADC); the stock firmware sets it while ANALOG FILTER ACTIVE is lit.
+//                  0 = LOOP: MAIN OUT comes straight from the main DAC; the filter takes the send DAC
+//                      (hw:ak4452audio,1) and feeds only the return ADC: the send/return loop for single channels.
+//                  On the unit: with 1, the return carried the mix while nothing was sent and LP CUTOFF acted on MAIN
+//                  OUT; with 0, the loop's click came back (16 ms) and MAIN OUT was unfiltered.
 //   limiter        GPIO5_IO06 "LMT_xOFF/ON": written 1 (ON) once, at the first switch, as the stock firmware does at
 //                  its start (the kernel boots it at 0); filter_limit=0 leaves it alone.
 //   HP CUTOFF      a 12-bit multiplying DAC (DAC7811 type): two bytes little-endian per change of the HP CUTOFF pot, the
 //                  code in bits 0–11 (the driver adds the load-and-update command itself), kept inside the factory span
 //                  4…3276 with the law 4 + 3272·(i/1023)³. The vendor driver returns 0 from a successful write.
 //
-// LP CUTOFF and RESONANCE are analog pots on that board that no microcontroller reads: they act on the audio of the
-// send/return loop only (AlsaOutputConfig::loopDevice, setting filter_loop). A device that does not open fails once, is
-// reported in one log line and is not retried. Thread-safe by split: setActive() runs on the message thread,
-// setHpCutoff() on the panel reader thread; each owns its own descriptor and state.
+// LP CUTOFF and RESONANCE are analog pots on that board that no microcontroller reads: they act on whatever passes the
+// filter. A device that does not open fails once, is reported in one log line and is not retried. Thread-safe by split:
+// setInsert() runs on the message thread, setHpCutoff() on the panel reader thread; each owns its descriptor and state.
 #pragma once
 
 #include <atomic>
@@ -36,15 +39,15 @@ public:
 
     void setEnabled(bool on) noexcept { enabled_.store(on, std::memory_order_relaxed); } // before the sources start
     void setLimit(bool on) noexcept { limit_.store(on, std::memory_order_relaxed); }     // write LMT ON at the first switch
-    void setActive(bool lit) noexcept;        // message thread: ACTIVE lit = the filter in (select line low), on change only
+    void setInsert(bool mainThrough) noexcept; // message thread: the select line (1 = main through the filter), on change only
     void setHpCutoff(int value1023) noexcept; // panel reader thread: the DAC code, on change only
 
     // The 12-bit DAC code of an afs.hpCutoff value 0–1023 (kDacMin…kDacMax; also for the tests).
     static unsigned dacCode(int value1023) noexcept;
     // The vendor driver's synchronous SPI write returns 0 on success, a generic driver the byte count: only −1 fails.
     static constexpr bool dacWriteOk(long result) noexcept { return result == 0 || result == 2; }
-    // The select line's level (active low).
-    static constexpr unsigned char selectLevel(bool filterIn) noexcept { return filterIn ? 0 : 1; }
+    // The select line's level.
+    static constexpr unsigned char selectLevel(bool mainThrough) noexcept { return mainThrough ? 1 : 0; }
 
 private:
     bool writeLine(int line, unsigned char level, const char* what) noexcept;

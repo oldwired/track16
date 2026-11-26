@@ -58,9 +58,10 @@ public:
     // The touch strip's modes, in the order of its MODE lamps (PITCH, REPEAT, USER1, USER2).
     enum StripMode : int { StripPitch, StripRepeat, StripTempo, StripVolume, StripModes };
     static constexpr int kStripRepeat[8] = {16, 12, 8, 6, 4, 3, 2, 1}; // REPEAT: loop rows per strip segment, bottom … top
-    // DRIVE (the stock firmware's law): gain 1 + 3·x², 0 … +12 dB, on what goes into the analog filter. OVER: the
-    // driven send's peak above +5.1 dBFS of the send DAC (it runs at −6 dB), held 0.5 s.
-    static constexpr float kOverThreshold = 1.7988709f;
+    // DRIVE (the stock firmware's law): gain 1 + 3·x², 0 … +12 dB, on what goes into the analog filter (the main DAC
+    // in the Master route, the send in the Channels route). OVER: that DAC's peak above 0.9 of full scale (the stock
+    // firmware's +5.1 dBFS with its −6 dB DAC gain), held 0.5 s.
+    static constexpr float kOverThreshold = 0.9f;
     static float driveGain(int value1023) noexcept
     {
         const float x = static_cast<float>(std::clamp(value1023, 0, 1023)) / 1023.0f;
@@ -156,7 +157,7 @@ public:
     int stripPosition() const noexcept { return stripPosPub_.load(std::memory_order_relaxed); }
     bool stripTouched() const noexcept { return stripTouchPub_.load(std::memory_order_relaxed); }
     bool stripLatched() const noexcept { return stripLatchPub_.load(std::memory_order_relaxed); }
-    float overLevel() const noexcept { return overLevel_.load(std::memory_order_relaxed); } // held peak of the driven send
+    float overLevel() const noexcept { return overLevel_.load(std::memory_order_relaxed); } // held DAC peak of the driven signal
     bool over() const noexcept { return overLevel() >= kOverThreshold; }                      // the OVER lamp
 
     // platform::AudioProcessor
@@ -191,6 +192,8 @@ private:
     void stopLoop(bool returnInTime) noexcept;
     void startLoop(int rows, int owner) noexcept; // owner: the LOOP pad, or kStripOwner
     void stripApply() noexcept;                   // the strip's effect from its mode, position, touch and HOLD
+    // Frames from the engine to the jacks: the output buffer plus the loop-latency delay of the main path.
+    double outputLatency() const noexcept { return audioLatencyFrames.load(std::memory_order_relaxed) + delayNow_; }
     int validOrder(int order) const noexcept;
     long rowsBefore(int order) const noexcept;
     void advance(int& order, int& row, long rows) const noexcept;
@@ -264,7 +267,7 @@ private:
     };
     std::array<RouteChange, 8> routeQueue_ {};
     int routeHead_ = 0, routeCount_ = 0;
-    std::vector<float> delayL_, delayR_;
+    std::vector<float> delayL_, delayR_, delayWL_, delayWR_;
     static constexpr float kDcPole = 0.999f;          // the return's DC blocker (about 7 Hz)
     float dcInL_ = 0, dcInR_ = 0, dcOutL_ = 0, dcOutR_ = 0, returnGain_ = 2.0f;
     int delayWrite_ = 0, delayNow_ = 0, delayPrev_ = 0, fadeDelay_ = 0;

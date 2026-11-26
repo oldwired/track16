@@ -177,7 +177,7 @@ svg text { font-family: var(--display); }
   add({ id: 'drive', g: 'filter', s: ['c', 340, 165, 32], name: 'DRIVE', tag: '0…+12 dB',
     act: 'Raises what goes into the analog filter by up to +12 dB (the stock firmware\'s curve). The gain is digital; the saturation you hear is the analog filter board being driven hot. It acts only on what goes through the filter (ACTIVE or FILTER pads).', knob: true });
   add({ id: 'over', g: 'filter', s: ['r', 418, 162, 24, 8, 2], name: 'OVER lamp', tag: '',
-    act: 'Lights while the driven signal peaks near the filter send\'s full scale (+5.1 dBFS, held 0.5 s). Above that the send clips digitally: back the DRIVE off a little.' });
+    act: 'Lights while the driven signal peaks above 90 % of the full scale of the DAC that feeds the filter (held 0.5 s). Above that it clips or saturates digitally: back the DRIVE off a little.' });
   add({ id: 'lp', g: 'filter', s: ['c', 515, 165, 32], name: 'LOW PASS CUTOFF', tag: 'LP · ANALOG',
     act: 'Analog pot on the filter board. It acts on whatever goes through the filter: the whole mix (ACTIVE) or the channels on FILTER pads. Fully closed, the filtered part goes silent.', knob: true });
   add({ id: 'res', g: 'filter', s: ['c', 690, 165, 32], name: 'RESONANCE', tag: 'RES · ANALOG',
@@ -185,7 +185,7 @@ svg text { font-family: var(--display); }
   add({ id: 'hp', g: 'filter', s: ['c', 865, 165, 32], name: 'HIGH PASS CUTOFF', tag: 'HP · ANALOG',
     act: 'Sets the analog high-pass on the filter board: Track16 writes the knob position to the board\'s cutoff DAC.', knob: true });
   add({ id: 'active', g: 'filter', s: ['c', 978, 168, 20], name: 'ANALOG FILTER ACTIVE', tag: 'WHOLE MIX',
-    act: 'Sends the whole mix through the analog filter, or back to pads only.', sh: 'Clears with SHIFT + STOP.',
+    act: 'Puts the analog filter in the main output\'s path: the whole mix is filtered on its way to MAIN OUT, with no delay (PHONES stays unfiltered). Off: the main output is clean and only FILTER pads use the filter, through its send/return loop.', sh: 'Clears with SHIFT + STOP.',
     lamp: 'Lit while any audio goes through the filter (whole mix or FILTER pads), and for a moment at start while Track16 measures the filter loop.' });
 
   add({ id: 'smode', g: 'sound', s: ['r', 124, 268, 76, 44, 6], name: 'MODE (touch strip)', tag: 'NEXT MODE',

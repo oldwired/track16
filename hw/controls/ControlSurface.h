@@ -85,6 +85,8 @@ public:
     virtual ~LampSink() = default;
     virtual void setLamp(Control, std::uint32_t rgb, std::uint8_t level) = 0;
     virtual void flush() = 0;
+    // The analog filter board's main-path insert (imx6: the select line, panel::AnalogBoard); applied at flush().
+    virtual void setFilterInsert(bool) {}
 };
 
 } // namespace io

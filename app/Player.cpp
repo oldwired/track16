@@ -140,6 +140,8 @@ void Player::prepare(double sampleRate, int)
     sampleRate_ = sampleRate > 0 ? sampleRate : 44100.0;
     delayL_.assign(kMaxDelay, 0.0f);
     delayR_.assign(kMaxDelay, 0.0f);
+    delayWL_.assign(kMaxDelay, 0.0f);
+    delayWR_.assign(kMaxDelay, 0.0f);
     measureBuf_.assign(8192, 0.0f);
     delayWrite_ = 0;
 }
@@ -355,7 +357,7 @@ void Player::midiSend(std::uint64_t frame, const std::uint8_t* bytes, int size) 
     MidiScheduler* midi = midi_.load(std::memory_order_acquire);
     if (midi == nullptr)
         return;
-    const double offset = static_cast<double>(frame - periodFrame_) + audioLatencyFrames.load(std::memory_order_relaxed);
+    const double offset = static_cast<double>(frame - periodFrame_) + outputLatency();
     const double ns = offset / sampleRate_ * 1e9 + 1e6 * midiOffsetMs.load(std::memory_order_relaxed);
     midi->schedule(periodNs_ + static_cast<std::uint64_t>(std::max(0.0, ns)), bytes, size);
 }
@@ -494,7 +496,7 @@ void Player::onRow(int order, int row, std::uint64_t frame) noexcept
 
     rowFrame_ = frame;
     publishPosition();
-    const double ns = (static_cast<double>(frame - periodFrame_) + audioLatencyFrames.load(std::memory_order_relaxed)) / sampleRate_ * 1e9;
+    const double ns = (static_cast<double>(frame - periodFrame_) + outputLatency()) / sampleRate_ * 1e9;
     rowStartNs_.store(periodNs_ + static_cast<std::uint64_t>(ns), std::memory_order_release);
     if (rowFrames_ > 0)
         rowSeconds_.store(rowFrames_ / sampleRate_, std::memory_order_relaxed);
@@ -699,7 +701,7 @@ void Player::handle(const Event& e) noexcept
         }
         startedOnce_ = true;
         rowFrame_ = 0; // no row length from before the pause
-        rowStartNs_.store(periodNs_ + static_cast<std::uint64_t>(audioLatencyFrames.load(std::memory_order_relaxed) / sampleRate_ * 1e9),
+        rowStartNs_.store(periodNs_ + static_cast<std::uint64_t>(outputLatency() / sampleRate_ * 1e9),
                           std::memory_order_release);
         clockRow(frame_);
         midiRowNotes(pattern_, row_, frame_);
@@ -1082,6 +1084,7 @@ void Player::process(const platform::AudioIO& io) noexcept
         for (int i = 0; i < n; ++i)
         {
             float outL = 0, outR = 0;
+            float dacPeak = 0; // the driven signal as the DAC that feeds the filter sees it (1 = full scale)
             if (loop)
             {
                 const std::uint64_t now = frame_ + static_cast<std::uint64_t>(i);
@@ -1094,37 +1097,45 @@ void Player::process(const platform::AudioIO& io) noexcept
                     --routeCount_;
                 }
                 // The direct path, delayed by the loop's latency (a latency change cross-fades the two taps).
+                // Both stems, delayed by the loop's latency in every route, so a route change never shifts the song in
+                // time (a latency change cross-fades the two taps).
                 const int w = delayWrite_;
-                delayL_[static_cast<std::size_t>(w)] = dl[i];
-                delayR_[static_cast<std::size_t>(w)] = dr[i];
+                const auto at = [](int i) { return static_cast<std::size_t>(i); };
+                delayL_[at(w)] = dl[i];
+                delayR_[at(w)] = dr[i];
+                delayWL_[at(w)] = wl[i];
+                delayWR_[at(w)] = wr[i];
                 const int rd = (w - delayNow_ + kMaxDelay) % kMaxDelay;
-                float ddl = delayL_[static_cast<std::size_t>(rd)], ddr = delayR_[static_cast<std::size_t>(rd)];
+                float ddl = delayL_[at(rd)], ddr = delayR_[at(rd)], dwl = delayWL_[at(rd)], dwr = delayWR_[at(rd)];
                 if (fadeDelay_ > 0)
                 {
                     const int rp = (w - delayPrev_ + kMaxDelay) % kMaxDelay;
                     const float k = static_cast<float>(fadeDelay_--) / kFade;
-                    ddl = ddl * (1 - k) + delayL_[static_cast<std::size_t>(rp)] * k;
-                    ddr = ddr * (1 - k) + delayR_[static_cast<std::size_t>(rp)] * k;
+                    ddl = ddl * (1 - k) + delayL_[at(rp)] * k;
+                    ddr = ddr * (1 - k) + delayR_[at(rp)] * k;
+                    dwl = dwl * (1 - k) + delayWL_[at(rp)] * k;
+                    dwr = dwr * (1 - k) + delayWR_[at(rp)] * k;
                 }
                 delayWrite_ = (w + 1) % kMaxDelay;
                 const float retL = rl[i], retR = rr[i];
-                // In the Off route the wet stem carries nothing (no channel is routed), so the dry line is the mix.
+                if (driveLeft_ > 0)
+                    driveNow_ = --driveLeft_ == 0 ? driveTarget_ : driveNow_ + driveStep_;
+                // Off: the mix (the wet stem carries nothing). Channels: the dry stem plus the filter's return.
+                // Master: the whole mix, driven, on the main DAC, which the filter board then filters in its main path
+                // (the select line high: AnalogBoard.h), with no loop and no latency of its own.
                 auto mainFor = [&](int r, float& L, float& R) {
                     switch (static_cast<FilterRoute>(r))
                     {
-                    case FilterRoute::Off: L = ddl; R = ddr; break;
+                    case FilterRoute::Off: L = ddl + dwl; R = ddr + dwr; break;
                     case FilterRoute::Channels: L = ddl + retL; R = ddr + retR; break;
-                    case FilterRoute::Master: L = retL; R = retR; break;
+                    case FilterRoute::Master: L = (ddl + dwl) * driveNow_; R = (ddr + dwr) * driveNow_; break;
                     }
                 };
-                if (driveLeft_ > 0)
-                    driveNow_ = --driveLeft_ == 0 ? driveTarget_ : driveNow_ + driveStep_;
-                auto sendFor = [&](int r, float& L, float& R) { // what goes into the filter, driven
+                auto sendFor = [&](int r, float& L, float& R) { // what goes into the loop, driven
                     switch (static_cast<FilterRoute>(r))
                     {
-                    case FilterRoute::Off: L = R = 0; break;
                     case FilterRoute::Channels: L = wl[i] * driveNow_; R = wr[i] * driveNow_; break;
-                    case FilterRoute::Master: L = (dl[i] + wl[i]) * driveNow_; R = (dr[i] + wr[i]) * driveNow_; break;
+                    default: L = R = 0; break;
                     }
                 };
                 mainFor(routeMain_, outL, outR);
@@ -1150,20 +1161,25 @@ void Player::process(const platform::AudioIO& io) noexcept
                     }
                     sl[i] = SL;
                     sr2[i] = SR;
-                    // OVER: the driven send's peak, held 0.5 s
-                    if (const float pk = std::max(std::fabs(SL), std::fabs(SR)); pk >= overPeak_ || overHold_ <= 0)
-                    {
-                        overPeak_ = pk;
-                        overHold_ = overHoldFrames;
-                    }
-                    else
-                        --overHold_;
+                    dacPeak = std::max(std::fabs(SL), std::fabs(SR)) / returnGain_; // the send DAC runs at 1 / returnGain_
                 }
+                if (routeMain_ == static_cast<int>(FilterRoute::Master) || (fadeMain_ > 0 && mainPrev_ == static_cast<int>(FilterRoute::Master)))
+                    dacPeak = std::max(dacPeak, std::max(std::fabs(outL), std::fabs(outR)) * gain * volumeNow_);
             }
             else
             {
                 outL = dl[i] + wl[i];
                 outR = dr[i] + wr[i];
+            }
+            if (loop) // OVER: that peak, held 0.5 s
+            {
+                if (dacPeak >= overPeak_ || overHold_ <= 0)
+                {
+                    overPeak_ = dacPeak;
+                    overHold_ = overHoldFrames;
+                }
+                else
+                    --overHold_;
             }
             volumeNow_ += (stripVolume_ - volumeNow_) * volumeSmooth;
             outL = softClip(outL * gain * volumeNow_);

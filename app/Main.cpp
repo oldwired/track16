@@ -251,6 +251,8 @@ int run()
         if (lamps)
         {
             screen.lamps(lampFrame, now);
+            // The whole mix goes through the filter board's main path; single channels use the send/return loop.
+            lamps->setFilterInsert(player.route() == FilterRoute::Master);
             io::apply(lampFrame, now, io::LampBrightness::Normal, *lamps); // sent on change (+ a 4 Hz heartbeat)
         }
         // The filter loop's latency: measured once the lamps have shown ACTIVE for a few frames (the lamp drives the

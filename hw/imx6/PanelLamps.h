@@ -59,7 +59,7 @@ private:
 class PanelLamps final : public io::LampSink
 {
 public:
-    // `board` (may be null): the analog filter's select line follows the ACTIVE lamp (AnalogBoard.h).
+    // `board` (may be null): the analog filter's select line follows setFilterInsert() (AnalogBoard.h).
     explicit PanelLamps(std::shared_ptr<LampBus> bus, std::shared_ptr<AnalogBoard> board = {})
         : bus_(std::move(bus)), board_(std::move(board))
     {
@@ -67,15 +67,14 @@ public:
     void setLamp(io::Control c, std::uint32_t rgb, std::uint8_t level) override
     {
         frame_.setLamp(c, rgb, level);
-        if (c == io::Control::AfsActive)
-            active_ = level > 0 && (rgb & 0xFFFFFFu) != 0;
     }
+    void setFilterInsert(bool on) override { insert_ = on; }
     void flush() override;
 
 private:
     std::shared_ptr<LampBus> bus_;
     std::shared_ptr<AnalogBoard> board_;
-    bool active_ = false;
+    bool insert_ = false;
     TxFrame frame_;
 };
 } // namespace platform::imx6::panel

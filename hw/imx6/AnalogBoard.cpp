@@ -62,7 +62,7 @@ bool AnalogBoard::writeLine(int line, unsigned char level, const char* what) noe
     return true;
 }
 
-void AnalogBoard::setActive(bool lit) noexcept
+void AnalogBoard::setInsert(bool lit) noexcept
 {
     if (! enabled_.load(std::memory_order_relaxed) || gpioFailed_ || lastActive_ == static_cast<int>(lit))
         return;
@@ -75,7 +75,7 @@ void AnalogBoard::setActive(bool lit) noexcept
     limitDone_ = true;
     if (! writeLine(kSelectLine, selectLevel(lit), "filter-select FAILED write"))
         return;
-    std::printf("[sp16-mod] %s ANALOG filter-select %s (GPIO5_IO05 = %d)\n", identity::envPrefix, lit ? "FILTER" : "THRU",
+    std::printf("[sp16-mod] %s ANALOG filter-select %s (GPIO5_IO05 = %d)\n", identity::envPrefix, lit ? "MAIN INSERT" : "LOOP",
                 selectLevel(lit));
     std::fflush(stdout);
     lastActive_ = lit ? 1 : 0;
