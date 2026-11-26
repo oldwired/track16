@@ -215,7 +215,7 @@ struct Screen::Browser final : juce::Component
 {
     const Library* library = nullptr;
     int selected = 0, top = 0, playing = -1;
-    static constexpr float kRowH = 44, kHeadH = 44;
+    static constexpr float kRowH = 60, kHeadH = 52; // large: read on a 7" screen from a standing position
     juce::String root;
 
     int visibleRows() const { return static_cast<int>((static_cast<float>(getHeight()) - kHeadH - 8) / kRowH); }
@@ -244,11 +244,11 @@ struct Screen::Browser final : juce::Component
         g.fillAll(c::bg);
         const auto& list = library->entries();
         const float w = static_cast<float>(getWidth());
-        theme::text(g, 16, kHeadH / 2, Align::Left, Text::Label, c::text1, "LIBRARY");
-        theme::text(g, 120, kHeadH / 2, Align::Left, Text::Caption, c::text2,
+        theme::text(g, 16, kHeadH / 2, Align::Left, Text::Title, c::text1, "LIBRARY");
+        theme::text(g, 140, kHeadH / 2, Align::Left, Text::Body, c::text2,
                     juce::String(static_cast<int>(list.size())) + " MODULES  " + kDot + "  " + root);
-        theme::text(g, w - 16, kHeadH / 2, Align::Right, Text::Caption, c::text3,
-                    "SELECT: CHOOSE  " + kDot + "  PUSH: PLAY  " + kDot + "  BACK: PLAYER");
+        theme::text(g, w - 16, kHeadH / 2, Align::Right, Text::Label, c::text3,
+                    "SELECT: CHOOSE  " + kDot + "  PUSH: LOAD  " + kDot + "  PLAY: START  " + kDot + "  BACK: PLAYER");
         if (list.empty())
         {
             theme::text(g, w / 2, 200, Align::Centre, Text::Body, c::text2, "No modules found on the stick.");
@@ -277,17 +277,17 @@ struct Screen::Browser final : juce::Component
                 g.fillRoundedRectangle(r, theme::radiusS);
             }
             if (i == playing)
-                theme::glyph(g, theme::Glyph::Play, r.getX() + 14, r.getCentreY() - 6, 12, c::play);
-            float x = r.getX() + 36;
+                theme::glyph(g, theme::Glyph::Play, r.getX() + 16, r.getCentreY() - 9, 18, c::play);
+            float x = r.getX() + 48;
             if (! e.folder.empty())
             {
                 const juce::String folder = juce::String::fromUTF8(e.folder.c_str()) + " /";
-                theme::text(g, x, r.getCentreY(), Align::Left, Text::Caption, c::text3, folder);
-                x += theme::textWidth(Text::Caption, folder) + 10;
+                theme::text(g, x, r.getCentreY(), Align::Left, Text::ValueS, c::text3, folder);
+                x += theme::textWidth(Text::ValueS, folder) + 12;
             }
-            theme::text(g, x, r.getCentreY(), Align::Left, Text::BodyStrong, i == selected ? c::text1 : c::text2,
+            theme::text(g, x, r.getCentreY(), Align::Left, Text::Value, i == selected ? c::text1 : c::text2,
                         juce::String::fromUTF8(e.name.c_str()));
-            theme::text(g, r.getRight() - 16, r.getCentreY(), Align::Right, Text::Caption, c::text3, sizeText(e.size));
+            theme::text(g, r.getRight() - 16, r.getCentreY(), Align::Right, Text::Body, c::text3, sizeText(e.size));
         }
         // The scroll position.
         if (static_cast<int>(list.size()) > rows)
@@ -379,7 +379,7 @@ struct Screen::OutsPage final : juce::Component
 
     const outs::Layout* layout = nullptr;
     std::shared_ptr<const SongData> song;
-    int page = 0, stemsUsed = 0, stemsTotal = 0, identJack = -1;
+    int page = 0, stemsUsed = 0, stemsTotal = 0, toneJack = -1;
     std::uint16_t unserved = 0;
     std::uint64_t muted = 0, held = 0;
     std::array<float, outs::kJacks> level {};
@@ -413,7 +413,8 @@ struct Screen::OutsPage final : juce::Component
             pool += "  " + kDot + "  POOL FULL: " + juce::String(__builtin_popcount(unserved)) + " NOT ROUTED (out_stems)";
         theme::text(g, 92, kHeadH / 2, Align::Left, Text::Caption, unserved != 0 ? c::warn : c::text2, pool);
         theme::text(g, w - 16, kHeadH / 2, Align::Right, Text::Caption, c::text3,
-                    "HOLD PADS + STEP 1 MAIN / 3-8 JACK (TWO KEYS: PAIR)  " + kDot + "  SHIFT+PAD: +MAIN  " + kDot + "  STEP ALONE: SOURCE");
+                    "HOLD PADS + STEP 1 MAIN / 3-8 JACK (TWO: PAIR)  " + kDot + "  SHIFT+PAD: +MAIN  " + kDot + "  STEP: SOURCE  " + kDot
+                        + "  SHIFT+STEP 1-10: TEST TONE");
         if (layout == nullptr)
             return;
         // The jacks: name, source, level.
@@ -423,10 +424,10 @@ struct Screen::OutsPage final : juce::Component
         {
             const float x = jackX(j);
             const auto src = layout->source[static_cast<std::size_t>(j)];
-            const bool ident = identJack == j;
-            g.setColour(ident ? c::accentWeak : c::surface2);
+            const bool testing = toneJack == j;
+            g.setColour(testing ? c::accentWeak : c::surface2);
             g.fillRoundedRectangle(x, kJackY, kColW, kJackH, theme::radiusM);
-            theme::text(g, x + kColW / 2, kJackY + 16, Align::Centre, Text::Caption, ident ? c::accent : c::text2,
+            theme::text(g, x + kColW / 2, kJackY + 16, Align::Centre, Text::Caption, testing ? c::accent : c::text2,
                         "OUT " + juce::String(j + 3));
             theme::text(g, x + kColW / 2, kJackY + 38, Align::Centre, Text::BodyStrong,
                         src == outs::Source::Channels ? groupColour(j / 2) : c::text1, outs::sourceName(src));
@@ -635,7 +636,7 @@ void Screen::takeLoaded()
     logLine("LOAD %s \"%s\" %s, %d ch, %d orders, %d patterns, %d instruments, %.0f s, instances=%d (filter %d, outs %d) (%.0f ms)",
             d.path.c_str(), d.title.c_str(), d.type.c_str(), d.channels, d.numOrders, d.numPatterns, std::max(d.numInstruments, d.numSamples),
             d.durationSeconds, r->song->instances(), r->song->wet ? 1 : 0, static_cast<int>(r->song->outs.size()), r->ms);
-    event("LOADED " + juce::String::fromUTF8(d.title.c_str()));
+    event("LOADED " + juce::String::fromUTF8(d.title.c_str()) + (r->job.play ? "" : "  " + kDot + "  PLAY STARTS IT"));
     r->song->playOnAdopt = r->job.play;
     pending_ = std::move(r->song); // replaces one the player has not taken yet
     playingIndex_ = r->job.index;
@@ -793,7 +794,8 @@ void Screen::setChannelDest(int channel, std::uint8_t dest)
 }
 
 // STEP keys in the OUTS pad mode. With pads held: their channels to MAIN (STEP 1–2) or a jack (STEP 3–8; with the pair's
-// other STEP key held as well: the pair). Alone: STEP 3–8 cycle what the jack carries; SHIFT + STEP 1: the jack beeps.
+// other STEP key held as well: the pair). Alone: STEP 3–8 cycle what the jack carries. SHIFT + STEP 1–10: a 3 s test
+// tone on MAIN L, MAIN R, OUT 3 … OUT 8, PHONES L, PHONES R alone.
 void Screen::outsStep(int s, double nowMs)
 {
     const std::uint64_t pads = padsHeld_ & 0xFFFF;
@@ -817,11 +819,15 @@ void Screen::outsStep(int s, double nowMs)
                          nowMs);
         return;
     }
-    if (s == 0 && shift_)
+    if (shift_) // the output test
     {
-        player_.identJacks();
-        event("OUTS IDENT: 1 BEEP ON OUT 3, 2 ON OUT 4 ... 6 ON OUT 8");
-        logLine("OUTS ident started");
+        if (s >= Player::kToneOutputs)
+            return;
+        static const char* const names[] = {"MAIN L", "MAIN R", "OUT 3", "OUT 4", "OUT 5", "OUT 6", "OUT 7", "OUT 8", "PHONES L", "PHONES R"};
+        const bool stop = player_.toneOutput() == s;
+        player_.testTone(s);
+        event(stop ? juce::String("TEST TONE OFF") : juce::String("TEST TONE: ") + names[s] + " ONLY, 3 S (440 HZ)");
+        logLine("OUTS test tone %s %s", stop ? "off" : "on", names[s]);
         return;
     }
     if (s >= 2 && s <= 7)
@@ -935,7 +941,7 @@ bool Screen::handle(const io::ControlEvent& e, double nowMs)
                 const int row = browser_->rowAt(at - kBody.getPosition());
                 if (row >= 0 && row == browser_->selected)
                 {
-                    loadEntry(row, true);
+                    loadEntry(row, false); // loads; PLAY starts it
                     setView(View::Player);
                 }
                 else if (row >= 0)
@@ -1024,7 +1030,7 @@ bool Screen::handle(const io::ControlEvent& e, double nowMs)
     case C::SelectorPush:
         if (view_ == View::Library)
         {
-            loadEntry(browser_->selected, true);
+            loadEntry(browser_->selected, false); // loads; PLAY starts it
             setView(View::Player);
         }
         else
@@ -1178,7 +1184,7 @@ void Screen::frame(double nowMs, float fps)
         changed |= assign(p.stemsUsed, player_.outStemsUsed());
         changed |= assign(p.stemsTotal, player_.outStemsTotal());
         changed |= assign(p.unserved, player_.outsUnserved());
-        changed |= assign(p.identJack, player_.identJack());
+        changed |= assign(p.toneJack, player_.toneOutput() - 2);
         changed |= assign(p.muted, player_.muteMask.load() | (player_.soloMask.load() != 0 ? ~player_.soloMask.load() : 0ull));
         changed |= assign(p.held, padsHeld_ & 0xFFFF);
         changed |= assign(outsShown_, layout_);
@@ -1608,9 +1614,7 @@ void Screen::lamps(io::LampFrame& f, double) const
             {
                 const int j = i - 2;
                 const auto src = layout_.source[static_cast<std::size_t>(j)];
-                if (player_.identJack() == j)
-                    s = {LampMode::BlinkFast, io::lampcolour::white, 0};
-                else if (showHeld)
+                if (showHeld)
                     s = (outs::jackMask(d) >> j) & 1 ? LampState {LampMode::On, groups[j / 2], 0} : LampState {};
                 else if (src == outs::Source::Channels)
                     s = {(usedJacks >> j) & 1 ? LampMode::On : LampMode::Faint, groups[j / 2], 0};
@@ -1618,6 +1622,11 @@ void Screen::lamps(io::LampFrame& f, double) const
                     s = {src == outs::Source::Click ? LampMode::BlinkSlow : LampMode::Dim,
                          src == outs::Source::Return ? io::lampcolour::red : io::lampcolour::white, 0};
             }
+            // SHIFT: the output test's ten keys; the one playing blinks.
+            if (shift_ && ! showHeld)
+                s = i < Player::kToneOutputs ? LampState {LampMode::Dim, io::lampcolour::white, 0} : LampState {};
+            if (player_.toneOutput() == i)
+                s = {LampMode::BlinkFast, io::lampcolour::white, 0};
             f[io::step(i + 1)] = s;
         }
     }

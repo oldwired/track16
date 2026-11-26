@@ -112,7 +112,11 @@ public:
     void setStripMode(int mode) noexcept;            // StripMode; ends what the strip did in the old mode
     void setStripHold(bool on) noexcept;             // HOLD: the strip keeps its last value after the finger leaves
     void setOuts(const outs::Layout&) noexcept;      // the single outs' layout (the audio thread takes it next period)
-    void identJacks() noexcept { identArm_.store(true, std::memory_order_release); } // beeps: 1 on OUT 3, 2 on OUT 4, …
+    // The output test: a kToneSeconds 440 Hz tone on output k alone (0/1 MAIN L/R, 2–7 OUT 3–8, 8/9 PHONES L/R), in
+    // place of what it carries; the same k again (or kToneStop) stops it.
+    static constexpr int kToneOutputs = 10, kToneStop = -2;
+    static constexpr double kToneSeconds = 3.0;
+    void testTone(int output) noexcept { toneArm_.store(output, std::memory_order_release); }
 
     // Settings (message thread writes, audio thread reads once per period).
     std::atomic<int> padMode {static_cast<int>(PadMode::Mute)};
@@ -172,12 +176,12 @@ public:
     float overLevel() const noexcept { return overLevel_.load(std::memory_order_relaxed); } // held DAC peak of the driven signal
     bool over() const noexcept { return overLevel() >= kOverThreshold; }                      // the OVER lamp
     // the single outs: instances in use / in the pool, destinations (bits 1–9) with channels but no free instance,
-    // each jack's peak since the last call, and the jack the identification beeps on now (−1 = none)
+    // each jack's peak since the last call, and the output the test tone plays on (−1 = none)
     int outStemsUsed() const noexcept { return outStemsUsed_.load(std::memory_order_relaxed); }
     int outStemsTotal() const noexcept { return outStemsTotal_.load(std::memory_order_relaxed); }
     std::uint16_t outsUnserved() const noexcept { return outsUnserved_.load(std::memory_order_relaxed); }
     float takeJackPeak(int jack0) noexcept { return jackPeak_[static_cast<std::size_t>(jack0 % outs::kJacks)].exchange(0.0f); }
-    int identJack() const noexcept { return identJackPub_.load(std::memory_order_relaxed); }
+    int toneOutput() const noexcept { return toneOutPub_.load(std::memory_order_relaxed); }
 
     // platform::AudioProcessor
     void prepare(double sampleRate, int maxDeviceFrames) override;
@@ -315,15 +319,16 @@ private:
     std::array<std::uint64_t, outs::kMaxStems> appliedOut_ {};
     std::array<std::int8_t, kMaxChannels> vuStem_ {};
     std::uint32_t seenOutsSerial_ = 0;
-    bool clickUsed_ = false, identOn_ = false;
-    int clickLeft_ = 0, identT_ = 0;
+    bool clickUsed_ = false;
+    int clickLeft_ = 0, toneOut_ = -1, toneT_ = 0;
     float clickPhase_ = 0, clickStep_ = 0, clickAmp_ = 0, clickDecay_ = 0;
     // written by setOuts()
     std::array<std::atomic<std::uint8_t>, kMaxChannels> outDest_ {};
     std::array<std::atomic<std::uint8_t>, outs::kJacks> jackSource_ {};
     std::atomic<std::uint64_t> outAlsoMain_ {0};
     std::atomic<std::uint32_t> outsSerial_ {0};
-    std::atomic<bool> identArm_ {false};
+    static constexpr int kToneNone = -1;
+    std::atomic<int> toneArm_ {kToneNone};
 
     // published
     std::atomic<int> order__ {0}, row__ {0}, pattern__ {0}, speed_ {6}, queuedOrder_ {-1}, loopLength_ {0}, route_ {0};
@@ -338,7 +343,7 @@ private:
     std::array<std::atomic<float>, kMaxChannels> vu_ {};
     std::array<std::atomic<float>, 2> peak_ {};
     std::array<std::atomic<float>, outs::kJacks> jackPeak_ {};
-    std::atomic<int> outStemsUsed_ {0}, outStemsTotal_ {0}, identJackPub_ {-1};
+    std::atomic<int> outStemsUsed_ {0}, outStemsTotal_ {0}, toneOutPub_ {-1};
     std::atomic<std::uint16_t> outsUnserved_ {0};
 };
 } // namespace app

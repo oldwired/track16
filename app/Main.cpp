@@ -21,7 +21,6 @@
 //   out_stems=<0…6>             libopenmpt instances for the single outs OUT 3–8 (default 4; each costs CPU and memory)
 //   outs=<layout>               the single outs' layout for modules without their own (app/Outs.h), e.g.
 //                               "src=ch,ch,ch,ch,clean,click 1=3-4 2=3-4"
-//   outs_ident=1                at start, beep on each single out (1 beep on OUT 3, 2 on OUT 4, …): which jack is which
 // and passes the rest to the platform (audio_period, audio_periods, filter_loop, …: hw/imx6/Imx6Platform.cpp).
 #include "app/GlDisplay.h"
 #include "app/Log.h"
@@ -207,11 +206,6 @@ int run()
     screenConfig.outStems = std::clamp(number(settings, "out_stems", 4), 0, outs::kMaxStems);
     screenConfig.outsDefault = settings["outs"];
     screenConfig.dataDir = machine->paths().dataDir;
-    if (settings["outs_ident"] == "1")
-    {
-        player.identJacks();
-        logLine("OUTS ident at start: 1 beep on OUT 3, 2 on OUT 4 ... 6 on OUT 8");
-    }
     Screen screen(player, midi, screenConfig);
     screen.onQuit = [] { platform::requestQuit(); };
     std::string error;

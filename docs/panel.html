@@ -217,7 +217,7 @@ svg text { font-family: var(--display); }
   ['FILTER', 'MUTE', 'LOOP', 'PLAY'].forEach((m, i) => add({ id: 'tmode' + i, g: 'pads', s: ['r', ...dz(824 + 112 * i, 52, 104, 72), 4],
     name: 'SCREEN: ' + m + ' button', act: i === 3 ? 'Tap: PLAY pad mode; tap again in PLAY: KIT mode.' : i === 0 ? 'Tap: FILTER pad mode; tap again in FILTER: OUTS mode (and back).' : 'Tap: ' + m + ' pad mode.' }));
   add({ id: 'tbody', g: 'nav', s: ['r', ...dz(0, 137, 1280, 487), 4], name: 'SCREEN: body',
-    act: 'PLAYER: the pattern rain (rows fall onto the playhead and flare in their instrument\'s colour). In the OUTS pad mode: the OUTS page instead, a grid of the pads\' 16 channels against MAIN, OUT 3–8 and +MAIN (tap a cell to route; tap a jack\'s name to change what it carries) with a level meter per jack. LIBRARY: tap a module to select it, tap it again to play it.' });
+    act: 'PLAYER: the pattern rain (rows fall onto the playhead and flare in their instrument\'s colour). In the OUTS pad mode: the OUTS page instead, a grid of the pads\' 16 channels against MAIN, OUT 3–8 and +MAIN (tap a cell to route; tap a jack\'s name to change what it carries) with a level meter per jack. LIBRARY: tap a module to select it, tap it again to load it (PLAY starts it).' });
   add({ id: 'tknobs', g: 'sound', s: ['r', ...dz(0, 624, 1280, 144), 4], name: 'SCREEN: knob strip',
     act: 'Shows the six encoders\' values, right above them.' });
 
@@ -237,8 +237,8 @@ svg text { font-family: var(--display); }
   add({ id: 'back', g: 'nav', s: ['r', 1800, 298, 58, 30, 14], name: 'BACK', tag: 'SWITCH VIEW', shTag: 'QUIT',
     act: 'Switch between LIBRARY and PLAYER.', sh: 'Quit Track16 back to the boot menu.' });
   add({ id: 'home', g: 'nav', s: ['c', 1914, 313, 16], name: 'HOME', tag: 'LIBRARY', act: 'Go to the LIBRARY.' });
-  add({ id: 'sel', g: 'nav', s: ['c', 1862, 470, 72], name: 'SELECT (turn / push)', tag: 'CHOOSE · PUSH: PLAY', shTag: 'CHOOSE ×10',
-    act: 'LIBRARY: turn to choose a module, push to play it. PLAYER: turn to choose the instrument for the PLAY pads, push to go back to the LIBRARY.',
+  add({ id: 'sel', g: 'nav', s: ['c', 1862, 470, 72], name: 'SELECT (turn / push)', tag: 'CHOOSE · PUSH: LOAD', shTag: 'CHOOSE ×10',
+    act: 'LIBRARY: turn to choose a module, push to load it (PLAY starts it). PLAYER: turn to choose the instrument for the PLAY pads, push to go back to the LIBRARY.',
     sh: 'LIBRARY: moves 10 modules per step.' });
 
   const T = [
@@ -413,12 +413,15 @@ svg text { font-family: var(--display); }
   const stripTag = text(0, 0, '', 16, col('sound'), tags, { transform: 'translate(140 713) rotate(-90)', 'font-weight': 700 });
   stripTag.textContent = 'PITCH · REPEAT · TEMPO · VOL';
   const modeTagText = { filter: 'FILTER', mute: 'MUTE', loop: 'LOOP', play: 'PLAY', kit: 'KIT', outs: 'OUTS' };
-  const stepOuts = n => n <= 2 ? { label: 'MAIN', sub: n === 1 && state.shift ? 'IDENT' : '',
-      act: 'With pads held: their channels back to MAIN only.', sh: n === 1 ? 'SHIFT + STEP 1: identify the jacks: 1 beep on OUT 3, 2 on OUT 4 … 6 on OUT 8.' : '',
+  const toneSh = n => `Output test: a 3 s 440 Hz tone on ${['MAIN L', 'MAIN R', 'OUT 3', 'OUT 4', 'OUT 5', 'OUT 6', 'OUT 7', 'OUT 8', 'PHONES L', 'PHONES R'][n - 1]} alone, in place of what it carries; again: off.`;
+  const stepOuts = n => n <= 2 ? { label: 'MAIN', sub: state.shift ? (n === 1 ? 'TONE L' : 'TONE R') : '',
+      act: 'With pads held: their channels back to MAIN only.', sh: toneSh(n),
       lamp: 'While a pad is held: white if its channel plays on MAIN. Otherwise dim white.' }
-    : n <= 8 ? { label: 'OUT ' + n, sub: 'JACK',
+    : n <= 8 ? { label: 'OUT ' + n, sub: state.shift ? 'TONE' : 'JACK',
       act: `With pads held: their channels to OUT ${n} in mono; together with STEP ${n % 2 ? n + 1 : n - 1}: to the pair ${n % 2 ? n + '-' + (n + 1) : (n - 1) + '-' + n} in stereo. Without pads: what OUT ${n} carries, CH (the channels sent to it) → CLEAN (the mix before the analog filter and DRIVE) → RETURN (the filter's return) → CLICK (a metronome).`,
-      sh: '', lamp: 'While a pad is held: lit where its channel goes. Otherwise in the jack\'s colour (lit: channels on it, faint: free), dim white CLEAN, dim red RETURN, blinking white CLICK; fast white blinking while it beeps.' }
+      sh: toneSh(n), lamp: 'While a pad is held: lit where its channel goes. Otherwise in the jack\'s colour (lit: channels on it, faint: free), dim white CLEAN, dim red RETURN, blinking white CLICK. Fast white blinking: the test tone plays on it.' }
+    : n <= 10 ? { label: 'PHONES', sub: state.shift ? (n === 9 ? 'TONE L' : 'TONE R') : '', act: 'Not used in the OUTS mode without SHIFT.', sh: toneSh(n),
+      lamp: 'With SHIFT held: dim white (the output test). Fast white blinking: the test tone plays on it.' }
     : { label: '—', sub: '', act: 'Not used in the OUTS mode.', sh: '', lamp: 'Off.' };
 
   // ---------- render state ----------
@@ -450,7 +453,7 @@ svg text { font-family: var(--display); }
       if (state.mode === 'outs') {
         const o = stepOuts(n);
         c.padLabel.textContent = o.label; c.padSub.textContent = o.sub;
-        c.padRect.setAttribute('fill', n <= 2 ? '#f4f6f8' : n <= 8 ? ['#9db8ff', '#7ee0a0', '#ffc24a'][Math.floor((n - 3) / 2)] : '#2a2c30');
+        c.padRect.setAttribute('fill', n <= 2 ? '#f4f6f8' : n <= 8 ? ['#9db8ff', '#7ee0a0', '#ffc24a'][Math.floor((n - 3) / 2)] : n <= 10 ? '#cfd3d8' : '#2a2c30');
         Object.assign(c, { act: o.act, sh: o.sh, lamp: o.lamp });
         continue;
       }
@@ -554,7 +557,7 @@ svg text { font-family: var(--display); }
         const tr = document.createElement('tr');
         tr.dataset.id = id;
         const name = id === 'step1' ? 'STEP 1–16' : id === 'pad1' ? 'PADS 1–16' : c.name;
-        const act = id === 'step1' ? 'Jump to an order of the current order page; BAR 1–3 set when. In the OUTS pad mode: STEP 1 = MAIN, STEP 3–8 = the jacks OUT 3–8 (with pads held: route them; alone: what the jack carries).' :
+        const act = id === 'step1' ? 'Jump to an order of the current order page; BAR 1–3 set when. In the OUTS pad mode: STEP 1 = MAIN, STEP 3–8 = the jacks OUT 3–8 (with pads held: route them; alone: what the jack carries); SHIFT + STEP 1–10: a test tone on MAIN L/R, OUT 3–8, PHONES L/R.' :
           id === 'pad1' ? 'Depend on the pad mode: pick one above to see each pad on the drawing.' : c.act;
         const sh = id === 'step1' ? 'Choose the order page (pages of 16 orders).' : id === 'pad1' ? '' : c.sh;
         const td1 = document.createElement('td'); td1.textContent = name;

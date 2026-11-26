@@ -73,6 +73,7 @@ struct Rig
     std::uint64_t t = 0, ns = 1000000000ull;
     double energy = 0, sendEnergy = 0, time = 0;
     std::array<double, 6> jackEnergy {}; // OUT 3–8
+    std::array<double, 12> portEnergy {}; // every output buffer
     double diff34 = 0;                   // the largest |MAIN − OUT 3-4| sample difference (compare34)
     bool compare34 = false;
     long periods = 0, rowsSeen = 0;
@@ -131,6 +132,8 @@ struct Rig
                         finite = finite && std::isfinite(v);
                         jackEnergy[static_cast<std::size_t>(j)] += static_cast<double>(v * v);
                     }
+                for (std::size_t k = 0; k < 12; ++k)
+                    portEnergy[k] += static_cast<double>(out[k][static_cast<std::size_t>(i)] * out[k][static_cast<std::size_t>(i)]);
                 if (compare34)
                     diff34 = std::max({diff34, static_cast<double>(std::fabs(l - out[2][static_cast<std::size_t>(i)])),
                                        static_cast<double>(std::fabs(r - out[3][static_cast<std::size_t>(i)]))});
@@ -469,8 +472,8 @@ void testModule(const LibraryEntry& e)
 }
 
 // The single outs: a channel on OUT 3-4 leaves MAIN; with +MAIN both carry the same signal (also through a stutter
-// loop: the instances move in lockstep); a mono jack; a full pool; the clean mix and the click; the identification
-// beeps; a channel only on a single out does not start the filter route.
+// loop: the instances move in lockstep); a mono jack; a full pool; the clean mix and the click; the output
+// test tone; a channel only on a single out does not start the filter route.
 void testOuts(const LibraryEntry& e)
 {
     std::printf("== single outs: %s\n", e.name.c_str());
@@ -583,19 +586,31 @@ void testOuts(const LibraryEntry& e)
     CHECK(jackRms(5) > 1e-3, "no click on OUT 8 (rms %.5f)", jackRms(5));
     std::printf("  outs: channel %d, solo %.4f, on 3-4 %.4f (MAIN %.5f), click rms %.4f\n", ch + 1, solo, j34, onOut, jackRms(5));
 
-    // The identification beeps, with the song stopped: OUT 3 first, OUT 4 silent meanwhile.
+    // The output test, with the song stopped: the tone on OUT 4 alone, then on PHONES R alone, then off again.
     rig.player.setOuts(outs::Layout {});
     rig.player.stop();
     rig.run(0.1);
-    for (int j = 0; j < 6; ++j)
-        rig.player.takeJackPeak(j);
-    rig.player.identJacks();
-    rig.run(0.1);
-    const float p3 = rig.player.takeJackPeak(0), p4 = rig.player.takeJackPeak(1);
-    CHECK(rig.player.identJack() == 0 && p3 > 0.2f && p4 < 1e-6f, "ident: jack %d, peaks %.3f %.3f", rig.player.identJack(),
-          static_cast<double>(p3), static_cast<double>(p4));
-    rig.run(1.5);
-    CHECK(rig.player.identJack() == 1, "ident after 1.6 s on jack %d", rig.player.identJack());
+    auto toneOn = [&](int output) {
+        rig.player.testTone(output);
+        rig.portEnergy.fill(0);
+        rig.run(0.5);
+        int loud = -1, count = 0;
+        for (int k = 0; k < 10; ++k)
+            if (rig.portEnergy[static_cast<std::size_t>(k)] > 1.0)
+                loud = k, ++count;
+        CHECK(count == 1 && loud == output && rig.player.toneOutput() == output, "tone on %d: loud %d (%d outputs), playing %d", output, loud,
+              count, rig.player.toneOutput());
+    };
+    toneOn(3);
+    toneOn(9);
+    rig.player.testTone(9); // again: off
+    rig.run(0.05);
+    rig.portEnergy.fill(0);
+    rig.run(0.2);
+    CHECK(rig.player.toneOutput() == -1 && rig.portEnergy[9] < 1e-9, "tone not off (%d)", rig.player.toneOutput());
+    rig.player.testTone(0);
+    rig.run(3.2);
+    CHECK(rig.player.toneOutput() == -1, "tone still on after 3.2 s");
     CHECK(rig.finite, "non-finite samples");
 }
 

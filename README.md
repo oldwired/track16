@@ -24,7 +24,7 @@ Quit before pulling the stick: the menu and the app write their logs to it.
 
 ## Screens
 
-- **LIBRARY**: every module on the stick. Turn SELECT to choose, push SELECT to play.
+- **LIBRARY**: every module on the stick. Turn SELECT to choose, push SELECT to load it (PLAY starts it).
 - **PLAYER**: the pattern rain. The rows fall onto the playhead line, flare in their instrument's colour as they
   cross it, and fade into a trail. Column headers show each channel's level; muted channels are grey, filtered ones
   orange. The context bar shows order, row, speed, BPM, the title and the pad modes. In the OUTS pad mode the body
@@ -40,8 +40,8 @@ An interactive map of the panel with every control: [docs/panel.html](docs/panel
 |---|---|
 | PLAY | Play / pause (MIDI Start/Continue/Stop follow) |
 | STOP | Stop and rewind. SHIFT + STOP also clears mutes, solos and the master filter |
-| SELECT turn / push | Library: choose / play. Player: the instrument for the PLAY pads / back to the library |
-| SCENE / PATTERN | Previous / next module. With SHIFT: the PLAY pads' octave |
+| SELECT turn / push | Library: choose / load (PLAY starts it). Player: the instrument for the PLAY pads / back to the library |
+| SCENE / PATTERN | Previous / next module, playing at once. With SHIFT: the PLAY pads' octave |
 | STEP 1–16 | Jump to order 1–16 of the current order page; the jump is quantized (BAR keys). SHIFT + STEP n: order page n. In the OUTS pad mode: the outputs (below) |
 | BAR 1 / 2 / 3 | Jumps at the pattern end / on the beat / on the next row |
 | BAR 4 | Pattern loop on/off |
@@ -80,7 +80,7 @@ Each module channel plays on MAIN (the default), on one of the jacks OUT 3–8 i
 | Hold pads, press STEP 3 + 4 (5 + 6, 7 + 8) together | Those channels to the pair, stereo |
 | SHIFT + pad | +MAIN on/off |
 | STEP 3 … 8 alone | What the jack carries: CH (the channels sent to it) → CLEAN (the mix before the analog filter and DRIVE) → RETURN (the filter's return alone) → CLICK (a metronome, accent on the bar) |
-| SHIFT + STEP 1 | Identify the jacks: 1 beep on OUT 3, 2 on OUT 4 … 6 on OUT 8 |
+| SHIFT + STEP 1 … 10 | Output test: a 3 s 440 Hz tone on one output alone, in place of what it carries: STEP 1 / 2 MAIN L / R, 3 … 8 OUT 3 … 8, 9 / 10 PHONES L / R. The same key again stops it |
 
 The pads show where each channel goes: faint = MAIN, the jack group's colour (blue 3-4, green 5-6, amber 7-8) lit for
 a pair and dim for a single jack, blinking with +MAIN, red blinking when no instance was free (below). Holding a pad
@@ -159,8 +159,7 @@ filter_send_gain=0.5 the filter send's level (−6 dB: headroom for the drive); 
 main_gain=0.5        the main DAC's level (−6 dB as the stock firmware: headroom for DRIVE); 1 = 6 dB louder, no headroom
 out_stems=4          instances for the single outs (0 … 6): how many destinations can be in use at once
 outs=                the single outs' layout for modules without their own, e.g. src=ch,ch,ch,ch,clean,click 1=3-4 2=5+
-outs_ident=0         1: at start, beep on each single out (1 beep on OUT 3 … 6 on OUT 8) to check the jacks
-audio_map=           the codec's channels per jack if the beeps come out of the wrong jack, e.g. out34:8/10,out56:4/6
+audio_map=           the codec's channels per jack if a test tone comes out of the wrong jack, e.g. out34:8/10,out56:4/6
 stat=10              seconds between STAT lines in bootmenu.log
 ```
 

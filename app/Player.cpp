@@ -1183,10 +1183,17 @@ void Player::process(const platform::AudioIO& io) noexcept
     const float jackGain = std::pow(10.0f, gainDb.load(std::memory_order_relaxed) / 20.0f);
     const int nOut = song_ != nullptr ? static_cast<int>(song_->outs.size()) : 0;
     std::array<float, outs::kJacks> jackPeak {};
-    // The identification beeps: per jack j, j + 1 beeps of kBeep frames with kBeep gaps, then a pause.
-    if (identArm_.exchange(false, std::memory_order_acq_rel))
-        identT_ = 0, identOn_ = true;
-    const int kBeep = static_cast<int>(0.12 * sampleRate_), kIdentPause = static_cast<int>(0.8 * sampleRate_);
+    // The test tone: a request (output index, or kToneStop) starts it, or stops the one playing on that output.
+    if (const int want = toneArm_.exchange(kToneNone, std::memory_order_acq_rel); want != kToneNone)
+    {
+        if (want == kToneStop || want == toneOut_)
+            toneOut_ = -1;
+        else
+        {
+            toneOut_ = want;
+            toneT_ = 0;
+        }
+    }
 
     for (int done = 0; done < io.frames;)
     {
@@ -1387,36 +1394,13 @@ void Player::process(const platform::AudioIO& io) noexcept
                     }
                     jk[j] = src_[static_cast<std::size_t>(j ^ 1)] == src ? ((j & 1) ? R : L) : 0.5f * (L + R);
                 }
-                float beep = 0;
-                int beepJack = -1;
-                if (identOn_)
-                {
-                    int t = identT_++, j = 0;
-                    while (j < outs::kJacks && t >= (j + 1) * 2 * kBeep + kIdentPause)
-                        t -= (j + 1) * 2 * kBeep + kIdentPause, ++j;
-                    if (j >= outs::kJacks)
-                        identOn_ = false;
-                    else
-                    {
-                        beepJack = j;
-                        if (t < (j + 1) * 2 * kBeep && t % (2 * kBeep) < kBeep)
-                        {
-                            const int u = t % (2 * kBeep);
-                            const float env = std::min({1.0f, static_cast<float>(u) / 200.0f, static_cast<float>(kBeep - u) / 200.0f});
-                            beep = 0.4f * env * std::sin(2.0f * 3.14159265f * 880.0f * static_cast<float>(u) / static_cast<float>(sampleRate_));
-                        }
-                    }
-                }
                 for (int j = 0; j < outs::kJacks; ++j)
                 {
-                    float v = softClip(jk[j] * jackGain * volumeNow_ * outputGain_) * ceiling;
-                    if (j == beepJack)
-                        v += beep;
+                    const float v = softClip(jk[j] * jackGain * volumeNow_ * outputGain_) * ceiling;
                     jackPeak[static_cast<std::size_t>(j)] = std::max(jackPeak[static_cast<std::size_t>(j)], std::fabs(v));
                     if (jackOut[j] != nullptr)
                         jackOut[j][done + i] = v;
                 }
-                identJackPub_.store(identOn_ ? beepJack : -1, std::memory_order_relaxed);
             }
         }
         // PHONES: the same mix.
@@ -1432,6 +1416,23 @@ void Player::process(const platform::AudioIO& io) noexcept
     }
     for (int j = 0; j < outs::kJacks; ++j)
         raise(jackPeak_[static_cast<std::size_t>(j)], jackPeak[static_cast<std::size_t>(j)]);
+    // The test tone replaces what its output carries: 440 Hz at −12 dB of the DAC's full scale for kToneSeconds, with
+    // 10 ms fades. Output k is io.out[k]: 0/1 MAIN, 2–7 OUT 3–8, 8/9 PHONES (AudioPort × 2 + side).
+    if (toneOut_ >= 0)
+    {
+        const int total = static_cast<int>(kToneSeconds * sampleRate_), ramp = static_cast<int>(0.01 * sampleRate_);
+        float* out = toneOut_ < 2 * io.numOutPorts ? io.out[toneOut_] : nullptr;
+        for (int i = 0; i < io.frames && toneT_ < total; ++i, ++toneT_)
+        {
+            const float env = std::min({1.0f, static_cast<float>(toneT_) / ramp, static_cast<float>(total - toneT_) / ramp});
+            const float v = 0.25f * ceiling * env * std::sin(static_cast<float>(2.0 * 3.14159265358979 * 440.0 / sampleRate_) * static_cast<float>(toneT_));
+            if (out != nullptr)
+                out[i] = v;
+        }
+        if (toneT_ >= total)
+            toneOut_ = -1;
+    }
+    toneOutPub_.store(toneOut_, std::memory_order_relaxed);
 
     // Publish.
     playing_.store(playingNow_, std::memory_order_relaxed);
