@@ -14,7 +14,7 @@ nothing is installed on the unit and nothing is written to its internal memory.
 
 ```
 autoexec.bin        the boot menu (its release)
-track16             this app (out/track16)
+track16             this app (the latest release, or out/track16 when you build it)
 track16.conf        optional settings (below)
 modules/…           your modules, in any folders (all folders of the stick are searched)
 ```

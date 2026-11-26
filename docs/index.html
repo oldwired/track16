@@ -145,6 +145,7 @@ footer p { margin: 0 0 6px; max-width: 90ch; }
         through the SP-16's analog filter or out of its single outputs, and lock other gear to it over MIDI.</p>
       <div class="links">
         <a class="primary" href="#panel-map">Panel map</a>
+        <a href="https://github.com/oldwired/track16/releases/latest">Download</a>
         <a href="https://github.com/oldwired/track16">Source on GitHub</a>
         <a href="https://github.com/freesp16/bootmenu">freesp16 boot menu</a>
       </div>
@@ -178,7 +179,8 @@ track16.conf    optional settings
 modules/…       your modules, in any folders</pre>
         <ol>
           <li>Put the <a href="https://github.com/freesp16/bootmenu">freesp16 boot menu</a>, the <code>track16</code>
-            binary and your modules on a USB stick.</li>
+            binary from the <a href="https://github.com/oldwired/track16/releases/latest">latest release</a> and your
+            modules on a USB stick.</li>
           <li>Plug it into the running SP-16 and choose <b>Track16</b> in the boot menu.</li>
           <li>Turn SELECT to pick a module, push it to load, press PLAY.</li>
           <li><b>SHIFT + BACK</b> quits to the menu. Quit before pulling the stick: the logs are written to it.</li>
@@ -189,8 +191,9 @@ modules/…       your modules, in any folders</pre>
         <p>Track16 runs from the stick. Nothing is installed on the unit and nothing is written to its internal
           memory; switching off and back on without the stick gives you the stock SP-16.</p>
         <h3>Status</h3>
-        <p>Version 0.1.0, being tested on the unit. There is no binary release yet: build <code>track16</code> from the
-          source with <code>scripts/build-unit.sh</code> (Docker or Colima). The
+        <p>Version 0.1.0, being tested on the unit. Download <code>track16</code> from the
+          <a href="https://github.com/oldwired/track16/releases/latest">latest release</a>, or build it from the source
+          with <code>scripts/build-unit.sh</code> (Docker or Colima). The
           <a href="https://github.com/oldwired/track16#readme">README</a> has every setting of
           <code>track16.conf</code>, the MIDI details and how the engine works.</p>
       </section>
