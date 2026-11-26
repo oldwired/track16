@@ -52,6 +52,7 @@ void pinAudioThread() noexcept
 } // namespace
 
 constexpr int Player::kLoopLengths[16];
+constexpr int Player::kStripRepeat[8];
 
 Player::Player()
 {
@@ -103,6 +104,8 @@ void Player::padRelease(int pad0, int hit) noexcept
     post({Event::PadOff, static_cast<std::int16_t>(pad0 & 15), 0, static_cast<std::int16_t>(static_cast<std::uint16_t>(hit))});
 }
 void Player::toggleLoopLatch() noexcept { post({Event::LoopLatch}); }
+void Player::setStripMode(int mode) noexcept { post({Event::StripMode, static_cast<std::int16_t>(std::clamp(mode, 0, StripModes - 1))}); }
+void Player::setStripHold(bool on) noexcept { post({Event::StripHold, static_cast<std::int16_t>(on ? 1 : 0)}); }
 void Player::toggleFilterLatch(int channel) noexcept { post({Event::FilterLatch, static_cast<std::int16_t>(channel)}); }
 void Player::midiNote(int note, int velocity) noexcept
 {
@@ -525,6 +528,48 @@ void Player::stopLoop(bool returnInTime) noexcept
     planNext();
 }
 
+// Starts the stutter loop at the current row, or changes the running one's length (it keeps its start).
+void Player::startLoop(int rows, int owner) noexcept
+{
+    if (song_ == nullptr || ! playingNow_ || rows <= 0)
+        return;
+    if (! loopOn_)
+    {
+        loopOrder_ = order_;
+        loopStart_ = row_;
+        loopOn_ = true;
+        if (! returnPending_) // a loop right after a loop: the song position keeps counting from the first one
+        {
+            songOrder_ = order_;
+            songRow_ = row_;
+        }
+        returnPending_ = false;
+    }
+    const int len = std::max(1, std::min(rows, data_->patternRows(data_->orderPattern(loopOrder_)) - loopStart_));
+    if (len == loopLen_ && owner == loopPad_)
+        return;
+    loopLen_ = len;
+    loopPad_ = owner;
+    planNext();
+}
+
+// The strip acts while touched, and after the finger left while HOLD was on (until HOLD goes off or the mode changes).
+// PITCH bends ± stripPitchRange semitones, REPEAT runs a stutter loop whose length the position picks (kStripRepeat),
+// USER1 bends the tempo ± 8 %, USER2 sets the volume (top = full, bottom = silent). The middle (64) is neutral.
+void Player::stripApply() noexcept
+{
+    const bool on = stripTouch_ || stripLatch_;
+    const float x = (static_cast<float>(stripPos_) - 64.0f) / 64.0f;
+    stripPitch_ = on && stripMode_ == StripPitch ? x * stripPitchRange.load(std::memory_order_relaxed) : 0.0f;
+    stripTempo_ = on && stripMode_ == StripTempo ? 1.0f + 0.08f * x : 1.0f;
+    const float v = static_cast<float>(stripPos_) / 127.0f;
+    stripVolume_ = on && stripMode_ == StripVolume ? v * v : 1.0f;
+    if (on && stripMode_ == StripRepeat)
+        startLoop(kStripRepeat[std::clamp(stripPos_ * 8 / 128, 0, 7)], kStripOwner);
+    else if (loopOn_ && loopPad_ == kStripOwner)
+        stopLoop(true);
+}
+
 void Player::padOn(int pad, int velocity, int hit) noexcept
 {
     padHitOn_[static_cast<std::size_t>(pad)] = static_cast<std::uint16_t>(hit);
@@ -544,27 +589,9 @@ void Player::padOn(int pad, int velocity, int hit) noexcept
         break;
     case PadMode::Mute: break; // the UI toggles mutes (it knows SHIFT)
     case PadMode::Loop:
-    {
-        const int len = kLoopLengths[pad];
-        if (len <= 0 || ! playingNow_)
-            break;
-        if (! loopOn_)
-        {
-            loopOrder_ = order_;
-            loopStart_ = row_;
-            loopOn_ = true;
-            if (! returnPending_) // a loop right after a loop: the song position keeps counting from the first one
-            {
-                songOrder_ = order_;
-                songRow_ = row_;
-            }
-            returnPending_ = false;
-        }
-        loopLen_ = std::max(1, std::min(len, data_->patternRows(data_->orderPattern(loopOrder_)) - loopStart_));
-        loopPad_ = pad;
-        planNext();
+        if (kLoopLengths[pad] > 0)
+            startLoop(kLoopLengths[pad], pad);
         break;
-    }
     case PadMode::Play:
     case PadMode::Kit:
     {
@@ -630,7 +657,31 @@ void Player::handle(const Event& e) noexcept
             padOff(e.a & 15);
         break;
     case Event::Strip:
-        tempoBend.store(e.b != 0 ? 1.0f + 0.08f * (static_cast<float>(e.a) - 64.0f) / 64.0f : 1.0f, std::memory_order_relaxed);
+        stripTouch_ = e.b != 0;
+        if (stripTouch_)
+        {
+            stripPos_ = std::clamp<int>(e.a, 0, 127);
+            stripLatch_ = false;
+        }
+        else
+            stripLatch_ = stripHold_; // HOLD keeps the last position acting
+        stripApply();
+        break;
+    case Event::StripMode:
+        if (e.a != stripMode_)
+        {
+            stripLatch_ = false;
+            stripMode_ = e.a;
+            stripApply();
+        }
+        break;
+    case Event::StripHold:
+        stripHold_ = e.a != 0;
+        if (! stripHold_ && stripLatch_)
+        {
+            stripLatch_ = false;
+            stripApply();
+        }
         break;
     case Event::Play:
         if (song_ == nullptr || playingNow_)
@@ -666,6 +717,8 @@ void Player::handle(const Event& e) noexcept
         midiAllNotesOff(frame_);
         if (e.kind == Event::Stop && song_ != nullptr)
         {
+            if (stripMode_ == StripRepeat)
+                stripLatch_ = false; // a held REPEAT does not start again with the next PLAY
             stopLoop(false);
             returnPending_ = false;
             pendingJump_ = -1;
@@ -776,8 +829,8 @@ void Player::applySettings() noexcept
 {
     if (song_ == nullptr)
         return;
-    const float tempo = std::clamp(tempoFactor.load(std::memory_order_relaxed) * tempoBend.load(std::memory_order_relaxed), 0.25f, 4.0f);
-    const float pitch = std::exp2(std::clamp(pitchSemitones.load(std::memory_order_relaxed), -24.0f, 24.0f) / 12.0f);
+    const float tempo = std::clamp(tempoFactor.load(std::memory_order_relaxed) * stripTempo_, 0.25f, 4.0f);
+    const float pitch = std::exp2(std::clamp(pitchSemitones.load(std::memory_order_relaxed) + stripPitch_, -24.0f, 24.0f) / 12.0f);
     const int sep = std::clamp(stereoSeparation.load(std::memory_order_relaxed), 0, 200);
     int interp = interpolation.load(std::memory_order_relaxed);
     interp = interp >= 8 ? 8 : interp >= 4 ? 4 : interp >= 2 ? 2 : 1;
@@ -967,6 +1020,16 @@ void Player::process(const platform::AudioIO& io) noexcept
     route_.store(routeSend_ != 0 ? routeSend_ : routeMain_, std::memory_order_relaxed);
     measuring_.store(measuringNow, std::memory_order_relaxed);
 
+    // DRIVE: a 100-sample linear ramp to a new gain (the stock firmware's).
+    if (const float want = driveGain(drive.load(std::memory_order_relaxed)); want != driveTarget_)
+    {
+        driveTarget_ = want;
+        driveStep_ = (want - driveNow_) / 100.0f;
+        driveLeft_ = 100;
+    }
+    const float volumeSmooth = static_cast<float>(1.0 / (0.005 * sampleRate_)); // the strip's volume glides over ~5 ms
+    const int overHoldFrames = static_cast<int>(0.5 * sampleRate_);
+
     const float volume = mainVolume.load(std::memory_order_relaxed);
     const float gain = std::pow(10.0f, gainDb.load(std::memory_order_relaxed) / 20.0f) * volume * volume;
     float peakL = 0, peakR = 0;
@@ -1054,12 +1117,14 @@ void Player::process(const platform::AudioIO& io) noexcept
                     case FilterRoute::Master: L = retL; R = retR; break;
                     }
                 };
-                auto sendFor = [&](int r, float& L, float& R) {
+                if (driveLeft_ > 0)
+                    driveNow_ = --driveLeft_ == 0 ? driveTarget_ : driveNow_ + driveStep_;
+                auto sendFor = [&](int r, float& L, float& R) { // what goes into the filter, driven
                     switch (static_cast<FilterRoute>(r))
                     {
                     case FilterRoute::Off: L = R = 0; break;
-                    case FilterRoute::Channels: L = wl[i]; R = wr[i]; break;
-                    case FilterRoute::Master: L = dl[i] + wl[i]; R = dr[i] + wr[i]; break;
+                    case FilterRoute::Channels: L = wl[i] * driveNow_; R = wr[i] * driveNow_; break;
+                    case FilterRoute::Master: L = (dl[i] + wl[i]) * driveNow_; R = (dr[i] + wr[i]) * driveNow_; break;
                     }
                 };
                 mainFor(routeMain_, outL, outR);
@@ -1085,6 +1150,14 @@ void Player::process(const platform::AudioIO& io) noexcept
                     }
                     sl[i] = SL;
                     sr2[i] = SR;
+                    // OVER: the driven send's peak, held 0.5 s
+                    if (const float pk = std::max(std::fabs(SL), std::fabs(SR)); pk >= overPeak_ || overHold_ <= 0)
+                    {
+                        overPeak_ = pk;
+                        overHold_ = overHoldFrames;
+                    }
+                    else
+                        --overHold_;
                 }
             }
             else
@@ -1092,8 +1165,9 @@ void Player::process(const platform::AudioIO& io) noexcept
                 outL = dl[i] + wl[i];
                 outR = dr[i] + wr[i];
             }
-            outL = softClip(outL * gain);
-            outR = softClip(outR * gain);
+            volumeNow_ += (stripVolume_ - volumeNow_) * volumeSmooth;
+            outL = softClip(outL * gain * volumeNow_);
+            outR = softClip(outR * gain * volumeNow_);
             peakL = std::max(peakL, std::fabs(outL));
             peakR = std::max(peakR, std::fabs(outR));
             if (ml != nullptr)
@@ -1121,6 +1195,12 @@ void Player::process(const platform::AudioIO& io) noexcept
 
     // Publish.
     playing_.store(playingNow_, std::memory_order_relaxed);
+    overLevel_.store(loop ? overPeak_ : 0.0f, std::memory_order_relaxed);
+    stripModePub_.store(stripMode_, std::memory_order_relaxed);
+    stripPosPub_.store(stripPos_, std::memory_order_relaxed);
+    stripHoldPub_.store(stripHold_, std::memory_order_relaxed);
+    stripTouchPub_.store(stripTouch_, std::memory_order_relaxed);
+    stripLatchPub_.store(stripLatch_, std::memory_order_relaxed);
     raise(peak_[0], peakL);
     raise(peak_[1], peakR);
     if (song_ != nullptr)

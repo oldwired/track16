@@ -140,6 +140,8 @@ private:
     int lastMeasurements_ = 0;
     std::array<std::uint16_t, 16> padHits_ {}; // presses per pad, as the player counts them (Player::push)
     bool shift_ = false;
+    bool driveSeen_ = false, stripHold_ = false;
+    int stripMode_ = 0; // Player::StripPitch
     int orderPage_ = 0, touchRow_ = -1;
     std::uint64_t mutes_ = 0, solos_ = 0;
     std::uint64_t padsHeld_ = 0;

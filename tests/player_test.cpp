@@ -70,7 +70,7 @@ struct Rig
     float* outPtr[12] {};
     const float* inPtr[4] {};
     std::uint64_t t = 0, ns = 1000000000ull;
-    double energy = 0, time = 0;
+    double energy = 0, sendEnergy = 0, time = 0;
     long periods = 0, rowsSeen = 0;
     int lastOrder = -1, lastRow = -1;
     bool finite = true;
@@ -98,8 +98,8 @@ struct Rig
             for (int i = 0; i < kPeriod; ++i) // the loop: what was sent kLoopDelay frames ago
             {
                 const auto at = (t + static_cast<std::uint64_t>(i) - kLoopDelay) & 0xFFFF;
-                in2[static_cast<std::size_t>(i)] = ringL[at] * 0.9f;
-                in3[static_cast<std::size_t>(i)] = ringR[at] * 0.9f;
+                in2[static_cast<std::size_t>(i)] = ringL[at] * 0.5f; // the send DAC's −6 dB, a unity analog path
+                in3[static_cast<std::size_t>(i)] = ringR[at] * 0.5f;
             }
             for (auto& b : out)
                 std::fill(b.begin(), b.end(), 0.0f);
@@ -121,6 +121,7 @@ struct Rig
                 energy += static_cast<double>(l * l + r * r);
                 if (loop)
                 {
+                    sendEnergy += static_cast<double>(out[10][static_cast<std::size_t>(i)] * out[10][static_cast<std::size_t>(i)]);
                     ringL[(t + static_cast<std::uint64_t>(i)) & 0xFFFF] = out[10][static_cast<std::size_t>(i)];
                     ringR[(t + static_cast<std::uint64_t>(i)) & 0xFFFF] = out[11][static_cast<std::size_t>(i)];
                 }
@@ -142,6 +143,7 @@ struct Rig
         player.push({static_cast<std::uint8_t>(pad0), static_cast<std::uint8_t>(velocity), 60, static_cast<std::int8_t>(pad0)});
     }
     void release(int pad0) { player.padRelease(pad0, hits[static_cast<std::size_t>(pad0)]); }
+    void strip(int position, bool contact) { player.push(platform::stripTrigger(position, contact)); }
 };
 
 // Where `rows` rows after (order, row) is, in plain order (the player's idea of "where the song would be").
@@ -290,6 +292,68 @@ void testModule(const LibraryEntry& e)
     rig.player.masterFilter = false;
     rig.run(0.05);
     std::printf("  filter: channels rms %.3f, master rms %.3f\n", filtered, master);
+
+    // DRIVE: the send ×4 at full drive (+12 dB), OVER from the driven send only.
+    {
+        auto sendRms = [&](int drive) {
+            rig.player.drive = drive;
+            rig.player.jump(0, Quantize::Now);
+            rig.run(0.2);
+            rig.sendEnergy = 0;
+            rig.run(1.0);
+            return std::sqrt(rig.sendEnergy / kRate);
+        };
+        rig.player.masterFilter = true;
+        const double s0 = sendRms(0), s1 = sendRms(1023);
+        const float overAtFull = rig.player.overLevel();
+        rig.player.drive = 0;
+        rig.player.masterFilter = false;
+        rig.run(0.8);
+        if (s0 > 1e-3)
+            CHECK(s1 / s0 > 3.0 && s1 / s0 < 5.0, "drive ratio %.2f (want about 4)", s1 / s0);
+        CHECK(! rig.player.over(), "OVER with no route on (level %.2f)", static_cast<double>(rig.player.overLevel()));
+        std::printf("  drive: send rms %.3f → %.3f at full drive, OVER level %.2f\n", s0, s1, static_cast<double>(overAtFull));
+    }
+
+    // The strip. REPEAT: the top segment loops 1 row, the bottom one 16 (or what is left of the pattern); release returns.
+    {
+        rig.player.jump(0, Quantize::Now);
+        rig.run(0.3);
+        rig.player.setStripMode(Player::StripRepeat);
+        rig.strip(127, true);
+        rig.run(0.2);
+        CHECK(rig.player.loopActive() && rig.player.loopLength() == 1, "strip repeat top: active %d length %d",
+              rig.player.loopActive() ? 1 : 0, rig.player.loopLength());
+        rig.strip(0, true);
+        rig.run(0.1);
+        CHECK(rig.player.loopActive() && rig.player.loopLength() > 1, "strip repeat bottom: length %d", rig.player.loopLength());
+        rig.strip(0, false);
+        rig.run(0.1);
+        CHECK(! rig.player.loopActive(), "strip repeat: loop after release");
+        // HOLD keeps it until HOLD goes off.
+        rig.player.setStripHold(true);
+        rig.strip(100, true);
+        rig.run(0.1);
+        rig.strip(100, false);
+        rig.run(0.3);
+        CHECK(rig.player.loopActive() && rig.player.stripLatched(), "strip hold: loop %d latched %d", rig.player.loopActive() ? 1 : 0,
+              rig.player.stripLatched() ? 1 : 0);
+        rig.player.setStripHold(false);
+        rig.run(0.1);
+        CHECK(! rig.player.loopActive() && ! rig.player.stripLatched(), "strip hold off: loop still on");
+        // USER2: volume, bottom = silent.
+        rig.player.setStripMode(Player::StripVolume);
+        rig.strip(0, true);
+        rig.run(0.05);
+        const double quiet = rig.rms(0.5);
+        rig.strip(0, false);
+        rig.run(0.05);
+        CHECK(quiet < 1e-4, "strip volume at the bottom: rms %.5f", quiet);
+        CHECK(rig.player.stripMode() == Player::StripVolume, "strip mode %d", rig.player.stripMode());
+        rig.player.setStripMode(Player::StripPitch);
+        rig.run(0.02);
+        std::printf("  strip: repeat, hold and volume ok\n");
+    }
 
     // Mutes: everything muted is (nearly) silent.
     rig.player.muteMask = ~0ull;

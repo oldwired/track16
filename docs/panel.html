@@ -174,10 +174,10 @@ svg text { font-family: var(--display); }
 
   add({ id: 'mainout', g: 'sound', s: ['c', 162, 168, 34], name: 'MAIN OUT', tag: 'VOLUME',
     act: 'Output level of MAIN OUT and PHONES.', knob: true });
-  add({ id: 'drive', g: 'unused', s: ['c', 340, 165, 32], name: 'DRIVE', tag: 'NOT USED',
-    act: 'Not used yet. On the SP-16 the drive is a digital stage in the stock firmware, not part of the analog filter board. Track16 reads the knob but applies no drive.', knob: true });
-  add({ id: 'over', g: 'unused', s: ['r', 418, 162, 24, 8, 2], name: 'OVER lamp', tag: '',
-    act: 'Not lit by Track16 (it belongs to the drive stage).' });
+  add({ id: 'drive', g: 'filter', s: ['c', 340, 165, 32], name: 'DRIVE', tag: '0…+12 dB',
+    act: 'Raises what goes into the analog filter by up to +12 dB (the stock firmware\'s curve). The gain is digital; the saturation you hear is the analog filter board being driven hot. It acts only on what goes through the filter (ACTIVE or FILTER pads).', knob: true });
+  add({ id: 'over', g: 'filter', s: ['r', 418, 162, 24, 8, 2], name: 'OVER lamp', tag: '',
+    act: 'Lights while the driven signal peaks near the filter send\'s full scale (+5.1 dBFS, held 0.5 s). Above that the send clips digitally: back the DRIVE off a little.' });
   add({ id: 'lp', g: 'filter', s: ['c', 515, 165, 32], name: 'LOW PASS CUTOFF', tag: 'LP · ANALOG',
     act: 'Analog pot on the filter board. It acts on whatever goes through the filter: the whole mix (ACTIVE) or the channels on FILTER pads. Fully closed, the filtered part goes silent.', knob: true });
   add({ id: 'res', g: 'filter', s: ['c', 690, 165, 32], name: 'RESONANCE', tag: 'RES · ANALOG',
@@ -188,12 +188,15 @@ svg text { font-family: var(--display); }
     act: 'Sends the whole mix through the analog filter, or back to pads only.', sh: 'Clears with SHIFT + STOP.',
     lamp: 'Lit while any audio goes through the filter (whole mix or FILTER pads), and for a moment at start while Track16 measures the filter loop.' });
 
-  add({ id: 'smode', g: 'unused', s: ['r', 124, 268, 76, 44, 6], name: 'MODE (touch strip)', tag: 'NOT USED',
-    act: 'Not used. The strip always bends the tempo; its PITCH lamp stays lit.' });
-  add({ id: 'shold', g: 'unused', s: ['r', 124, 468, 76, 44, 6], name: 'HOLD (touch strip)', tag: 'NOT USED',
-    act: 'Not used. The tempo bend ends when you let go of the strip.' });
-  add({ id: 'strip', g: 'sound', s: ['r', 119, 534, 86, 359, 6], name: 'TOUCH STRIP', tag: 'TEMPO BEND',
-    act: 'Tempo bend while touched: above the middle faster, below slower, up to ±8 %. Letting go returns to the TEMPO knob\'s value.' });
+  add({ id: 'smode', g: 'sound', s: ['r', 124, 268, 76, 44, 6], name: 'MODE (touch strip)', tag: 'NEXT MODE',
+    act: 'Steps the strip through PITCH → REPEAT → USER1 (tempo) → USER2 (volume). Changing the mode ends what the strip was doing.',
+    lamp: 'PITCH / REPEAT / USER1 / USER2: the strip\'s mode.' });
+  add({ id: 'shold', g: 'sound', s: ['r', 124, 468, 76, 44, 6], name: 'HOLD (touch strip)', tag: 'KEEP VALUE',
+    act: 'On: the strip keeps its last value after you let go (a held bend, a running repeat, a lowered volume). Off: everything returns to normal.',
+    lamp: 'Lit while HOLD is on.' });
+  add({ id: 'strip', g: 'sound', s: ['r', 119, 534, 86, 359, 6], name: 'TOUCH STRIP', tag: '',
+    act: 'PITCH: bends the pitch up to ±12 semitones (middle = none; strip_pitch sets the range). REPEAT: a stutter loop while touched, 1 row at the top down to 16 rows at the bottom; on release the song continues in time. USER1: tempo bend ±8 %. USER2: volume, top = full, bottom = silent. Letting go returns to normal unless HOLD is on.',
+    lamp: 'The LEDs show where the strip acts (one segment in REPEAT).' });
 
   // 4 x 4 pads: bottom row = pads 1-4
   const PX = [272, 445, 619, 793], PY = [258, 400, 542, 684];
@@ -301,7 +304,7 @@ svg text { font-family: var(--display); }
   rect(1815, 128, 95, 117, 6, '#2a2c30'); rect(1822, 140, 81, 60, 4, '#050506'); rect(1840, 216, 48, 8, 3, '#4add8c');
   text(1862, 160, 'USB', 14, '#6b7078');
   rect(105, 255, 114, 657, 6, '#0a0b0c');
-  text(162, 351, 'PITCH', 15, '#4add8c'); text(162, 377, 'REPEAT', 15, '#555a60'); text(162, 403, 'USER1', 15, '#555a60'); text(162, 429, 'USER2', 15, '#555a60');
+  text(162, 351, 'PITCH', 15, '#4add8c'); text(162, 377, 'REPEAT', 15, '#4add8c'); text(162, 403, 'USER1', 15, '#9db8ff'); text(162, 429, 'USER2', 15, '#9db8ff');
   for (let i = 0; i < 16; i++) text(112 + i * 92 + 32, 953, String(i + 1), 16, silk);
   for (let j = 0; j < 4; j++) { text(1643 + j * 72 + 26, 953, String(j + 1), 16, silk); }
   rect(1816, 893, 92, 20, 2, silk); text(1862, 903, 'LENGTH', 14, '#0d0e10');
@@ -401,7 +404,7 @@ svg text { font-family: var(--display); }
   T.forEach(([id, , , cx]) => putTag(byId[id], cx, id === 'pattern' ? 928 : 904, 15));
   MK.forEach(([id], i) => putTag(byId[id], PX[i] + 71, 904, 15));
   const stripTag = text(0, 0, '', 16, col('sound'), tags, { transform: 'translate(140 713) rotate(-90)', 'font-weight': 700 });
-  stripTag.textContent = 'TEMPO BEND ±8 %';
+  stripTag.textContent = 'PITCH · REPEAT · TEMPO · VOL';
   const modeTagText = { filter: 'FILTER', mute: 'MUTE', loop: 'LOOP', play: 'PLAY', kit: 'KIT' };
 
   // ---------- render state ----------
@@ -501,11 +504,11 @@ svg text { font-family: var(--display); }
   const REF = [
     ['transport', ['play', 'stop', 'shiftk', 'scene', 'pattern', 'step1', 'bar1', 'bar2', 'bar3', 'bar4']],
     ['pads', ['ptrack', 'pmute', 'pslice', 'pscale', 'pad1']],
-    ['filter', ['active', 'lp', 'res', 'hp']],
-    ['sound', ['mainout', 'enc1', 'enc2', 'enc3', 'enc4', 'enc5', 'strip']],
+    ['filter', ['active', 'drive', 'over', 'lp', 'res', 'hp']],
+    ['sound', ['mainout', 'enc1', 'enc2', 'enc3', 'enc4', 'enc5', 'strip', 'smode', 'shold']],
     ['nav', ['sel', 'back', 'home', 'enc6', 'tback', 'tbody']],
     ['midi', ['rec']],
-    ['unused', ['drive', 'over', 'smode', 'shold', 'usbstop']],
+    ['unused', ['usbstop']],
   ];
   const MODEKEY_ACT = {
     ptrack: ['FILTER mode: hold a pad to send that channel through the analog filter. Press again: the next 16 channels.', ''],

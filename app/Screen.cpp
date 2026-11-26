@@ -597,6 +597,17 @@ bool Screen::handle(const io::ControlEvent& e, double nowMs)
         player_.mainVolume = std::clamp(static_cast<float>(e.value) / 1023.0f, 0.0f, 1.0f);
         return true;
     }
+    if (e.control == C::AfsDrive && e.kind == K::Value)
+    {
+        player_.drive = std::clamp<int>(e.value, 0, 1023);
+        if (driveSeen_) // the panel reports the pot once at start: no message for that
+        {
+            const float db = 20.0f * std::log10(Player::driveGain(e.value));
+            event("DRIVE +" + juce::String(db, 1) + " DB INTO THE ANALOG FILTER");
+        }
+        driveSeen_ = true;
+        return true;
+    }
     if (e.control == C::Strip)
     {
         if (e.source != io::kSourceStrip) // the strip's reader already told the player
@@ -682,6 +693,19 @@ bool Screen::handle(const io::ControlEvent& e, double nowMs)
             setView(view_ == View::Player ? View::Library : View::Player);
         break;
     case C::Home: setView(View::Library); break;
+    case C::StripMode:
+    {
+        const int m = stripMode_ = (stripMode_ + 1) % Player::StripModes;
+        player_.setStripMode(m);
+        static const char* const names[] = {"STRIP: PITCH BEND", "STRIP: REPEAT (TOP = SHORT LOOPS)", "STRIP: TEMPO BEND (USER 1)", "STRIP: VOLUME (USER 2)"};
+        event(names[m]);
+        break;
+    }
+    case C::StripHold:
+        stripHold_ = ! stripHold_;
+        player_.setStripHold(stripHold_);
+        event(stripHold_ ? "STRIP HOLD ON: THE LAST VALUE STAYS" : "STRIP HOLD OFF");
+        break;
     case C::SelectorPush:
         if (view_ == View::Library)
         {
@@ -1204,7 +1228,13 @@ void Screen::lamps(io::LampFrame& f, double) const
     // board's select line, hw/imx6/AnalogBoard.h) and while the loop's latency is measured.
     const bool filterLit = player_.route() != FilterRoute::Off || player_.measuring();
     f[C::AfsActive] = filterLit ? LampState {LampMode::On, io::lampcolour::red, 0} : LampState {};
-    io::stripLamps(0, false, false, io::StripMode::Pitch, f);
-    f[C::StripModePitch] = {LampMode::On, io::lampcolour::white, 0};
+    // The strip: its LEDs show the position it acts with, the MODE lamps its mode, HOLD whether it keeps its value.
+    const int stripMode = player_.stripMode();
+    io::stripLamps(player_.stripPosition(), player_.stripTouched(), player_.stripLatched(), static_cast<io::StripMode>(stripMode), f);
+    const C stripModes[] = {C::StripModePitch, C::StripModeRepeat, C::StripModeUser1, C::StripModeUser2};
+    for (int i = 0; i < 4; ++i)
+        f[stripModes[i]] = i == stripMode ? LampState {LampMode::On, io::lampcolour::white, 0} : LampState {};
+    f[C::StripHold] = player_.stripHold() ? LampState {LampMode::On, io::lampcolour::white, 0} : LampState {};
+    f[C::AfsOver] = player_.over() ? LampState {LampMode::On, io::lampcolour::red, 0} : LampState {};
 }
 } // namespace app

@@ -55,6 +55,17 @@ public:
     static constexpr int kFade = 256;
     static constexpr int kMaxDelay = 8192;
     static constexpr int kLoopLengths[16] = {1, 2, 3, 4, 6, 8, 12, 16, 24, 32, 48, 64, 0, 0, 0, 0};
+    // The touch strip's modes, in the order of its MODE lamps (PITCH, REPEAT, USER1, USER2).
+    enum StripMode : int { StripPitch, StripRepeat, StripTempo, StripVolume, StripModes };
+    static constexpr int kStripRepeat[8] = {16, 12, 8, 6, 4, 3, 2, 1}; // REPEAT: loop rows per strip segment, bottom … top
+    // DRIVE (the stock firmware's law): gain 1 + 3·x², 0 … +12 dB, on what goes into the analog filter. OVER: the
+    // driven send's peak above +5.1 dBFS of the send DAC (it runs at −6 dB), held 0.5 s.
+    static constexpr float kOverThreshold = 1.7988709f;
+    static float driveGain(int value1023) noexcept
+    {
+        const float x = static_cast<float>(std::clamp(value1023, 0, 1023)) / 1023.0f;
+        return 1.0f + 3.0f * x * x;
+    }
 
     Player();
     ~Player() override;
@@ -87,6 +98,8 @@ public:
     void toggleLoopLatch() noexcept;
     void toggleFilterLatch(int channel) noexcept;
     void midiNote(int note, int velocity) noexcept; // MIDI in: plays the selected instrument
+    void setStripMode(int mode) noexcept;            // StripMode; ends what the strip did in the old mode
+    void setStripHold(bool on) noexcept;             // HOLD: the strip keeps its last value after the finger leaves
 
     // Settings (message thread writes, audio thread reads once per period).
     std::atomic<int> padMode {static_cast<int>(PadMode::Mute)};
@@ -97,7 +110,9 @@ public:
     std::atomic<bool> patternLoop {false};
     std::atomic<bool> masterFilter {false};
     std::atomic<std::uint64_t> muteMask {0}, soloMask {0};
-    std::atomic<float> tempoFactor {1.0f}, tempoBend {1.0f}, pitchSemitones {0.0f};
+    std::atomic<float> tempoFactor {1.0f}, pitchSemitones {0.0f};
+    std::atomic<float> stripPitchRange {12.0f}; // PITCH strip: ± semitones at its ends
+    std::atomic<int> drive {0};            // the DRIVE pot, 0…1023
     std::atomic<float> gainDb {0.0f};      // module gain
     std::atomic<float> mainVolume {1.0f};  // the MAIN VOLUME pot, 0…1
     std::atomic<int> stereoSeparation {100}, interpolation {8};
@@ -135,6 +150,14 @@ public:
     float takeLoadMax() noexcept { return loadMax_.exchange(0.0f); }
     std::uint64_t songSerial() const noexcept { return serial_.load(std::memory_order_relaxed); } // the song now playing
     std::uint64_t droppedEvents() const noexcept { return dropped_.load(std::memory_order_relaxed); }
+    // the touch strip: its mode, HOLD, the position it acts with and whether it acts (touched, or held by HOLD)
+    int stripMode() const noexcept { return stripModePub_.load(std::memory_order_relaxed); }
+    bool stripHold() const noexcept { return stripHoldPub_.load(std::memory_order_relaxed); }
+    int stripPosition() const noexcept { return stripPosPub_.load(std::memory_order_relaxed); }
+    bool stripTouched() const noexcept { return stripTouchPub_.load(std::memory_order_relaxed); }
+    bool stripLatched() const noexcept { return stripLatchPub_.load(std::memory_order_relaxed); }
+    float overLevel() const noexcept { return overLevel_.load(std::memory_order_relaxed); } // held peak of the driven send
+    bool over() const noexcept { return overLevel() >= kOverThreshold; }                      // the OVER lamp
 
     // platform::AudioProcessor
     void prepare(double sampleRate, int maxDeviceFrames) override;
@@ -145,7 +168,7 @@ public:
 private:
     struct Event
     {
-        enum Kind : std::uint8_t { PadOn, PadOff, Play, Pause, Stop, Jump, LoopLatch, FilterLatch, Note, Strip } kind;
+        enum Kind : std::uint8_t { PadOn, PadOff, Play, Pause, Stop, Jump, LoopLatch, FilterLatch, Note, Strip, StripMode, StripHold } kind;
         std::int16_t a = 0, b = 0, c = 0;
     };
     // Why the next row is not the module's own next row.
@@ -166,6 +189,8 @@ private:
     void padOn(int pad, int velocity, int hit) noexcept;
     void padOff(int pad) noexcept;
     void stopLoop(bool returnInTime) noexcept;
+    void startLoop(int rows, int owner) noexcept; // owner: the LOOP pad, or kStripOwner
+    void stripApply() noexcept;                   // the strip's effect from its mode, position, touch and HOLD
     int validOrder(int order) const noexcept;
     long rowsBefore(int order) const noexcept;
     void advance(int& order, int& row, long rows) const noexcept;
@@ -207,6 +232,14 @@ private:
     bool loopOn_ = false, loopLatch_ = false, returnPending_ = false;
     int loopOrder_ = 0, loopStart_ = 0, loopLen_ = 0, loopPad_ = -1;
     int songOrder_ = 0, songRow_ = 0;     // where the song would be without the loop
+    static constexpr int kStripOwner = -2; // loopPad_ of a loop the REPEAT strip runs
+    // the touch strip
+    int stripMode_ = StripPitch, stripPos_ = 64;
+    bool stripTouch_ = false, stripHold_ = false, stripLatch_ = false; // latch: released while HOLD was on
+    float stripPitch_ = 0, stripTempo_ = 1, stripVolume_ = 1, volumeNow_ = 1;
+    // drive and OVER
+    float driveNow_ = 1, driveStep_ = 0, driveTarget_ = 1, overPeak_ = 0;
+    int driveLeft_ = 0, overHold_ = 0;
     int returnOrder_ = 0, returnRow_ = 0;
     // masks
     std::uint64_t filterHeld_ = 0, filterLatchBits_ = 0;
@@ -251,7 +284,9 @@ private:
     std::atomic<int> latency_ {0}, measurements_ {0};
     std::atomic<bool> playing_ {false}, loopActive_ {false}, loopLatched_ {false}, stems_ {false}, latencyMeasured_ {false}, measuring_ {false};
     std::atomic<bool> fixedLatency_ {false}, measureArm_ {false}, measureRequest_ {false};
-    std::atomic<float> bpm_ {125.0f}, loadAvg_ {0}, loadMax_ {0};
+    std::atomic<float> bpm_ {125.0f}, loadAvg_ {0}, loadMax_ {0}, overLevel_ {0};
+    std::atomic<int> stripModePub_ {StripPitch}, stripPosPub_ {64};
+    std::atomic<bool> stripHoldPub_ {false}, stripTouchPub_ {false}, stripLatchPub_ {false};
     std::atomic<double> rowSeconds_ {0.12};
     std::atomic<std::uint64_t> rowStartNs_ {0}, filterOn_ {0}, filterLatch_ {0}, padHeld_ {0}, serial_ {0}, dropped_ {0};
     std::array<std::atomic<float>, kMaxChannels> vu_ {};

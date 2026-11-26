@@ -13,6 +13,7 @@
 //   autoplay=0|1                play the first module at start
 //   stereo=<0…200>  interp=1|2|4|8   libopenmpt's stereo separation (%) and interpolation taps
 //   rows_per_beat=<n>           for the MIDI clock and the beat quantize (default 4)
+//   strip_pitch=<1…12>          the PITCH strip's range in semitones each way (default 12)
 //   midi_out=all|din|usb|none   midi_clock=0|1  midi_notes=0|1  midi_offset_ms=<ms>
 //   filter_latency=<frames>     the analog filter loop's latency (default: measured at start)
 //   filter_send_gain=<0…1>      the filter send's fixed gain (default 0.5, −6 dB; the return is brought back by 1/gain)
@@ -136,6 +137,7 @@ int run()
     player.stereoSeparation = number(settings, "stereo", 100);
     player.interpolation = number(settings, "interp", 4);
     player.rowsPerBeat = number(settings, "rows_per_beat", 4);
+    player.stripPitchRange = static_cast<float>(std::clamp(number(settings, "strip_pitch", 12), 1, 12));
     player.midiClock = settings["midi_clock"] == "1";
     player.midiNotes = settings["midi_notes"] == "1";
     player.midiOffsetMs = number(settings, "midi_offset_ms", 0);
