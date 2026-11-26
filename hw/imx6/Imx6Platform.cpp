@@ -27,7 +27,7 @@ namespace
 constexpr const char* panelDevice = "/dev/subucom_spi0.1";
 
 // The codec's logical outputs: 16 S16 channels in 8 two-channel DAC slots where only the even channel carries audio,
-// MAIN = 12/14 (observed), OUT3-4 = 8/10 and OUT5-6 = 4/6 (inferred, not verified), OUT7-8 = 0/2; the odd channels
+// MAIN = 12/14, OUT3-4 = 8/10, OUT5-6 = 4/6, OUT7-8 = 0/2 (all checked by ear with test tones); the odd channels
 // are padding written as 0. PHONES is the separate PCM hw:ak4452audio,0 channels 0/1 (AlsaOutputConfig::auxDevice);
 // the analog filter's send channel is unknown. The map is data: the setting audio_map (e.g. "out34:8/10,out56:4/6")
 // corrects it without a rebuild.

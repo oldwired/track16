@@ -1,7 +1,7 @@
 // Direct ALSA playback on a PCM opened by name ("alsa-direct"), shared by the SP-16 and the Linux desktop.
 // The PCM name, its channel count and the logical port map are parameters (AlsaOutputConfig):
 //  - imx6: the unit's main codec, hw:ak4458audio,0, 16 interleaved S16 channels at 44.1 kHz only, MAIN L/R on
-//    channels 12/14; OUT3-4 = 8/10, OUT5-6 = 4/6, OUT7-8 = 0/2 (inferred, not verified; the setting audio_map
+//    channels 12/14; OUT3-4 = 8/10, OUT5-6 = 4/6, OUT7-8 = 0/2 (checked on the unit; the setting audio_map
 //    corrects them) and PHONES on the second PCM hw:ak4452audio,0 channels 0/1 (AlsaOutputConfig::auxDevice).
 //  - linux: `default` (or the setting audio_device), 2 channels, MAIN = 0/1, the other ports absent; snd_pcm_writei
 //    (RW interleaved access, no mmap), so it works through the PipeWire/PulseAudio ALSA plugins.
