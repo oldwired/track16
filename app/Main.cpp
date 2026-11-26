@@ -15,6 +15,12 @@
 //   rows_per_beat=<n>           for the MIDI clock and the beat quantize (default 4)
 //   strip_pitch=<1…12>          the PITCH strip's range in semitones each way (default 12)
 //   midi_out=all|din|usb|none   midi_clock=0|1  midi_notes=0|1  midi_offset_ms=<ms>
+//   midi_sync=0|1               follow an external clock and its Start / Continue / Stop / Song Position (default 1)
+//   midi_sync_offset_ms=<ms>    moves the rows against that clock (positive: later)
+//   midi_in_notes=channels|selected|off   what MIDI notes play (default channels: MIDI channel n = module channel n)
+//   midi_kit_channel=<0…16>     the channel that plays instruments by note (36 = instrument 1; default 10, 0 = none)
+//   midi_control_channel=<0…16> the channel of the remote pads and controllers (default 16, 0 = none)
+//   midi_bend_range=<semitones> pitch bend range (default 2)
 //   filter_latency=<frames>     the analog filter loop's latency (default: measured at start)
 //   filter_send_gain=<0…1>      the filter send's fixed gain (default 0.5, −6 dB; the return is brought back by 1/gain)
 //   main_gain=<0.1…1>           the main DAC's fixed gain (default 0.5, −6 dB as the stock firmware: headroom for DRIVE)
@@ -65,6 +71,8 @@ platform::Settings loadSettings(const std::string& file)
     platform::Settings s {{"audio", "1"}, {"midi", "1"}, {"stat", "10"}, {"filter_loop", "1"}, {"audio_period", "128"},
                           {"audio_periods", "3"}, {"stereo", "100"}, {"interp", "4"}, {"rows_per_beat", "4"},
                           {"midi_out", "all"}, {"midi_clock", "1"}, {"midi_notes", "0"}, {"midi_offset_ms", "0"},
+                          {"midi_sync", "1"}, {"midi_sync_offset_ms", "0"}, {"midi_in_notes", "channels"}, {"midi_kit_channel", "10"},
+                          {"midi_control_channel", "16"}, {"midi_bend_range", "2"},
                           {"autoplay", "0"}, {"modules", ""}, {"filter_latency", "0"}, {"filter_send_gain", "0.5"}, {"main_gain", "0.5"}};
     std::ifstream in(file);
     for (std::string line; std::getline(in, line);)
@@ -145,6 +153,14 @@ int run()
     player.midiClock = settings["midi_clock"] == "1";
     player.midiNotes = settings["midi_notes"] == "1";
     player.midiOffsetMs = number(settings, "midi_offset_ms", 0);
+    player.midiSync = settings["midi_sync"] != "0";
+    player.midiSyncOffsetMs = number(settings, "midi_sync_offset_ms", 0);
+    player.midiInNotes = settings["midi_in_notes"] == "off"        ? Player::NotesOff
+                         : settings["midi_in_notes"] == "selected" ? Player::NotesSelected
+                                                                   : Player::NotesChannels;
+    player.midiKitChannel = std::clamp(number(settings, "midi_kit_channel", 10), 0, 16);
+    player.midiControlChannel = std::clamp(number(settings, "midi_control_channel", 16), 0, 16);
+    player.midiBendRange = static_cast<float>(std::clamp(number(settings, "midi_bend_range", 2), 0, 24));
 
     // Before the audio starts (the audio thread reads them from its first period).
     Midi midi(player, settings["midi_out"]);
@@ -309,14 +325,16 @@ int run()
             const auto& st = audioNow;
             const auto pos = player.position();
             const auto dbfs = [](float v) { return v > 1e-6f ? 20.0 * std::log10(static_cast<double>(v)) : -120.0; };
+            static const char* const syncName[] = {"int", "wait", "ext", "lost"};
             logLine("STAT fps=%.0f dsp=%.1f%% dsp_max=%.1f%% xruns=%llu playing=%d order=%d row=%d route=%d outs=%d/%d%s loop_latency=%d%s"
-                    " loop_live=%d loop_frames=%llu loop_drops=%llu send_peak=%.1fdB return_peak=%.1fdB midi_in=%d midi_out=%d midi_sent=%d",
+                    " loop_live=%d loop_frames=%llu loop_drops=%llu send_peak=%.1fdB return_peak=%.1fdB midi_in=%d midi_out=%d midi_sent=%d sync=%s clock_bpm=%.2f sync_error=%.1fms",
                     static_cast<double>(fps), static_cast<double>(player.loadAverage() * 100), static_cast<double>(player.takeLoadMax() * 100),
                     static_cast<unsigned long long>(st.xruns), player.playing() ? 1 : 0, pos.order, pos.row, static_cast<int>(player.route()),
                     player.outStemsUsed(), player.outStemsTotal(), player.outsUnserved() != 0 ? " (pool full)" : "",
                     player.latencyFrames(), player.stems() ? (player.latencyMeasured() ? " (measured)" : " (fallback)") : " (no loop)",
                     st.loopLive ? 1 : 0, static_cast<unsigned long long>(st.loopFrames), static_cast<unsigned long long>(st.loopDrops),
-                    dbfs(sendPeak), dbfs(returnPeak), midi.inputCount(), midi.outputCount(), midi.sentCount());
+                    dbfs(sendPeak), dbfs(returnPeak), midi.inputCount(), midi.outputCount(), midi.sentCount(),
+                    syncName[std::clamp(player.syncState(), 0, 3)], static_cast<double>(player.clockBpm()), static_cast<double>(player.syncErrorMs()));
             sendPeak = returnPeak = 0;
             lastStat = now;
         }

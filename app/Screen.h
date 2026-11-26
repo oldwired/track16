@@ -102,6 +102,7 @@ private:
     void setPadMode(PadMode mode, bool samePressed);
     int pageCount() const;
     void padPress(int pad0, int velocity, bool fromReader, double nowMs);
+    void midiControl(int cc, int value, double nowMs); // a controller on the MIDI control channel
     void padRelease(int pad0, double nowMs);
     void event(const juce::String& text);
     // the single outs: the layout of the module that plays, its file, editing it

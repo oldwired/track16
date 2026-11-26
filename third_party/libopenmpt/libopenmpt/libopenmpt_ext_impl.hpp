@@ -128,6 +128,10 @@ public:
 
 	void set_channel_silent( std::int32_t channel, bool silent ) override;
 
+	void set_voice_pitch( std::int32_t channel, double factor ) override;
+
+	double get_row_seconds() const override;
+
 private:
 
 	bool valid_position( std::int32_t order, std::int32_t row ) const;

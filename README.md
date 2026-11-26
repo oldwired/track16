@@ -135,9 +135,46 @@ Loops, the pattern loop and jumps take effect at a row boundary, so the song nev
   in time, where a follower counting the clock already is. Sent to the ports `midi_out` selects.
 - **Notes** (REC, or `midi_notes=1`): the notes of module channels 1–16 on MIDI channels 1–16, velocity from the
   volume column. Muting a channel ends its MIDI note, REC off ends them all; quitting sends Stop and All Notes Off.
-- **In**: notes play the selected instrument.
+- **Out timing**: all MIDI out is timed against the audio output (`midi_offset_ms` adjusts it per setup).
 
-All MIDI out is timed against the audio output (`midi_offset_ms` adjusts it per setup).
+### MIDI in
+
+- **Following a clock**: send Track16 Start, Continue, Stop and Song Position from a master and it follows: Start
+  plays from the top on the next clock pulse, Stop pauses, Song Position moves it (one sixteenth = one row at
+  `rows_per_beat=4`), Continue goes on from there. Pressing PLAY while a clock runs joins it on its next beat. While
+  it follows, the clock sets the tempo: each row is stretched or squeezed to one grid step of the clock
+  (24 / `rows_per_beat` pulses), with the rows' start at the jacks locked to the pulses (within about a millisecond
+  on the build machine, also through the module's own speed changes, which give way to the clock). TEMPO and the
+  strip's tempo bend wait meanwhile, the context bar shows **EXT BPM**, and Track16 sends no clock of its own (so it
+  never follows itself through a MIDI thru). STOP on the panel ends following. A clock that stops without a Stop
+  leaves the song playing at the last tempo (**NO CLOCK** on the TEMPO knob). `midi_sync=0` ignores all of this;
+  `midi_sync_offset_ms` moves the rows against the clock.
+- **Notes** (`midi_in_notes`): by default MIDI channel *n* plays in the voice of module channel *n*: the instrument
+  that channel played last (the selected one until it has played), at the note's pitch, where that channel plays
+  (MAIN, through the filter, or its single out). `selected` plays the instrument selected for the PLAY pads on every
+  channel; `off` plays nothing. The **kit channel** (`midi_kit_channel`, 10) plays instruments by note: 36 (C-2 in
+  most DAWs) is instrument 1, 37 instrument 2, …, at their standard pitch.
+- **Pitch bend** bends the notes of its channel (± `midi_bend_range` semitones, default 2); the **mod wheel** adds
+  vibrato (up to ± ½ semitone at 5.5 Hz). On the control channel both act on the whole module.
+- **All notes off** (CC 123) or all sound off (CC 120) ends every MIDI-played note.
+- **Control channel** (`midi_control_channel`, 16): a remote for the panel.
+
+| On the control channel | Does |
+|---|---|
+| Notes 36–51 | Pads 1–16, in the pad mode the panel is in (hold, velocity and release as on the pads) |
+| Program change *n* | Jump to order *n* + 1, quantized as the BAR keys say |
+| CC 7 | Volume (MAIN and the single outs) |
+| CC 70 … 75 | The knobs TEMPO, PITCH, STEREO, INTERP, GAIN, VIEW (64 = 100 % tempo, 0 semitones, 0 dB) |
+| CC 76 | DRIVE |
+| CC 80 / 81 / 82 | ANALOG FILTER ACTIVE / pattern loop / REC (≥ 64 = on) |
+| CC 85 | Pad mode: 0 FILTER, 1 MUTE, 2 LOOP, 3 PLAY, 4 KIT, 5 OUTS |
+| CC 102 … 117 | Mute channel 1 … 16 (≥ 64 = muted) |
+
+**Song Select** (on any channel) loads that module of the library (0 = the first), playing if Track16 plays.
+
+Live notes play only while the song plays (libopenmpt renders them with the module). Notes on MOD and S3M modules,
+which have samples but no instruments, stop at the note-off; instruments get their release, and are stopped two
+seconds later if they would sustain forever.
 
 ## Settings (`track16.conf` on the stick)
 
@@ -153,6 +190,12 @@ midi_out=all         all, din, usb or none
 midi_clock=1
 midi_notes=0
 midi_offset_ms=0
+midi_sync=1          follow an external clock and its Start / Continue / Stop / Song Position (0: ignore them)
+midi_sync_offset_ms=0  moves the rows against that clock (positive: later)
+midi_in_notes=channels  channels (MIDI channel n = module channel n's voice), selected, or off
+midi_kit_channel=10  the channel that plays instruments by note (36 = instrument 1); 0: none
+midi_control_channel=16  the channel of the remote pads and controllers; 0: none
+midi_bend_range=2    pitch bend range in semitones
 filter_loop=1        the analog filter loop (0: off)
 filter_latency=0     fixed loop latency in frames (0: measure at start)
 filter_send_gain=0.5 the filter send's level (−6 dB: headroom for the drive); the return is raised by 1/gain

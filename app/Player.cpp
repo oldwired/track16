@@ -57,7 +57,9 @@ constexpr int Player::kStripRepeat[8];
 Player::Player()
 {
     padChannel_.fill(-1);
-    noteChannel_.fill(-1);
+    for (auto& v : liveVoice_)
+        v.fill(-1);
+    lastInstrument_.fill(-1);
     midiNoteOn_.fill(-1);
     filterPadChannel_.fill(-1);
     vuStem_.fill(-1);
@@ -109,9 +111,23 @@ void Player::toggleLoopLatch() noexcept { post({Event::LoopLatch}); }
 void Player::setStripMode(int mode) noexcept { post({Event::StripMode, static_cast<std::int16_t>(std::clamp(mode, 0, StripModes - 1))}); }
 void Player::setStripHold(bool on) noexcept { post({Event::StripHold, static_cast<std::int16_t>(on ? 1 : 0)}); }
 void Player::toggleFilterLatch(int channel) noexcept { post({Event::FilterLatch, static_cast<std::int16_t>(channel)}); }
-void Player::midiNote(int note, int velocity) noexcept
+void Player::midiNote(int channel, int note, int velocity) noexcept
 {
-    post({Event::Note, static_cast<std::int16_t>(note & 127), static_cast<std::int16_t>(velocity)});
+    post({Event::Note, static_cast<std::int16_t>(note & 127), static_cast<std::int16_t>(velocity & 127), static_cast<std::int16_t>(channel & 15)});
+}
+void Player::midiBend(int channel, int value14) noexcept
+{
+    post({Event::Bend, static_cast<std::int16_t>(channel & 15), static_cast<std::int16_t>(std::clamp(value14, 0, 16383) - 8192)});
+}
+void Player::midiMod(int channel, int value) noexcept
+{
+    post({Event::Mod, static_cast<std::int16_t>(channel & 15), static_cast<std::int16_t>(std::clamp(value, 0, 127))});
+}
+void Player::midiAllNotesOff() noexcept { post({Event::AllOff}); }
+void Player::midiRealtime(std::uint8_t status, std::uint64_t ns, int port, int value) noexcept
+{
+    if (! realtime_.push({ns, status, static_cast<std::uint8_t>(port), static_cast<std::uint16_t>(value)}))
+        dropped_.fetch_add(1, std::memory_order_relaxed);
 }
 
 void Player::setOuts(const outs::Layout& l) noexcept
@@ -189,10 +205,17 @@ void Player::adopt(Song* song) noexcept
     appliedTempo_ = appliedPitch_ = -1;
     appliedSep_ = appliedInterp_ = -1;
     padChannel_.fill(-1);
-    noteChannel_.fill(-1);
+    for (auto& v : liveVoice_)
+        v.fill(-1);
+    liveCount_.fill(0);
+    lastInstrument_.fill(-1);
+    for (auto& r : released_)
+        r.voice = -1;
     playingNow_ = false;
     startedOnce_ = false;
     pulsesLeft_ = 0;
+    following_ = false; // a new module that plays joins a running clock again (Play)
+    syncArm_ = ArmNone;
     queuedOrder_.store(-1);
     loopActive_.store(false);
     loopLatched_.store(false);
@@ -376,7 +399,7 @@ void Player::midiSongPosition(std::uint64_t frame) noexcept
 // The song moved somewhere a follower cannot count to: stop, the new position, continue (the row's first pulse follows).
 void Player::midiReposition(std::uint64_t frame) noexcept
 {
-    if (! playingNow_ || ! midiClock.load(std::memory_order_relaxed))
+    if (! playingNow_ || ! midiClock.load(std::memory_order_relaxed) || following_)
         return;
     flushPulses(frame); // the last row's pulses belong before the stop
     midiByte(frame, 0xFC);
@@ -437,16 +460,21 @@ void Player::flushPulses(std::uint64_t frame) noexcept
         midiByte(frame, 0xF8);
 }
 
-void Player::clockRow(std::uint64_t frame) noexcept
+int Player::pulsesPerRow() const noexcept
 {
-    if (! midiClock.load(std::memory_order_relaxed) || ! playingNow_)
-        return;
-    flushPulses(frame);
     static constexpr int divisors[] = {1, 2, 3, 4, 6, 8, 12, 24};
     int rpb = rowsPerBeat.load(std::memory_order_relaxed);
     if (std::find(std::begin(divisors), std::end(divisors), rpb) == std::end(divisors))
         rpb = 4;
-    pulsesPerRow_ = 24 / rpb;
+    return 24 / rpb;
+}
+
+void Player::clockRow(std::uint64_t frame) noexcept
+{
+    if (! midiClock.load(std::memory_order_relaxed) || ! playingNow_ || following_)
+        return;
+    flushPulses(frame);
+    pulsesPerRow_ = pulsesPerRow();
     midiByte(frame, 0xF8);
     const double rowLen = rowFrames_ > 0 ? rowFrames_ : sampleRate_ * rowSeconds_.load(std::memory_order_relaxed);
     pulseStep_ = rowLen / pulsesPerRow_;
@@ -501,6 +529,12 @@ void Player::onRow(int order, int row, std::uint64_t frame) noexcept
     publishPosition();
     const double ns = (static_cast<double>(frame - periodFrame_) + outputLatency()) / sampleRate_ * 1e9;
     rowStartNs_.store(periodNs_ + static_cast<std::uint64_t>(ns), std::memory_order_release);
+    // The instrument each of the first 16 channels plays now: MIDI channel n plays its voice.
+    for (int c = 0; c < std::min(16, data_->channels); ++c)
+        if (const Cell* cell = data_->cell(pattern_, row_, c); cell != nullptr && cell->instrument > 0)
+            lastInstrument_[static_cast<std::size_t>(c)] = static_cast<std::int16_t>(cell->instrument - 1);
+    if (following_)
+        syncRow(static_cast<double>(periodNs_) + ns, true);
     if (rowFrames_ > 0)
         rowSeconds_.store(rowFrames_ / sampleRate_, std::memory_order_relaxed);
     if (reposition)
@@ -635,26 +669,341 @@ void Player::padOn(int pad, int velocity, int hit) noexcept
     }
 }
 
-// A live note (pads, MIDI in) plays on every instance, so their voice allocation stays the same; only MAIN hears it.
-int Player::playNote(int instrument0, int note, double velocity)
+// A live note (pads, MIDI in) plays on every instance, so their voice allocation stays the same; only the instances
+// that carry module channel `as` hear it (the dry one for as < 0, or when that channel is heard nowhere).
+int Player::playNote(int instrument0, int note, double velocity, int as)
 {
+    const auto heard = [&](const Stem& s) {
+        if (as < 0 || as >= kMaxChannels)
+            return &s == &song_->dry;
+        const std::uint64_t b = bit(as);
+        if (&s == &song_->dry)
+            return ! (appliedDry_ & b);
+        if (&s == &song_->wet)
+            return ! (appliedWet_ & b);
+        for (std::size_t k = 0; k < song_->outs.size(); ++k)
+            if (&s == &song_->outs[k])
+                return ! (appliedOut_[k] & b);
+        return false;
+    };
+    bool any = false;
+    song_->each([&](Stem& s) { any = any || heard(s); });
     int channel = -1;
     song_->each([&](Stem& s) {
         const int c = s.i->play_note(instrument0, note, velocity, 0.0);
         if (&s == &song_->dry)
             channel = c;
-        else
-            s.p->set_channel_silent(c, true);
+        s.p->set_channel_silent(c, any ? ! heard(s) : &s != &song_->dry);
     });
     return channel;
 }
 
+// ---- MIDI in ----
+
+// Note on / off from MIDI channel `channel`: the kit channel plays instrument (note − 36) at its standard pitch; the
+// other channels play module channel n's last instrument (or the selected one) at the note's pitch, where that
+// channel plays. The control channel's notes are the UI's (remote pads).
+void Player::liveNote(int channel, int note, int velocity) noexcept
+{
+    if (song_ == nullptr || channel < 0 || channel > 15)
+        return;
+    const int control = midiControlChannel.load(std::memory_order_relaxed) - 1;
+    const int kit = midiKitChannel.load(std::memory_order_relaxed) - 1;
+    const int mode = midiInNotes.load(std::memory_order_relaxed);
+    if (channel == control)
+        return;
+    auto& voice = liveVoice_[static_cast<std::size_t>(channel)][static_cast<std::size_t>(note & 127)];
+    if (voice >= 0)
+    {
+        noteOff(voice);
+        voice = -1;
+        --liveCount_[static_cast<std::size_t>(channel)];
+    }
+    if (velocity <= 0)
+        return;
+    const int count = data_->numInstruments > 0 ? data_->numInstruments : data_->numSamples;
+    int instrument0 = instrument.load(std::memory_order_relaxed), pitch = note, as = -1;
+    if (channel == kit)
+    {
+        instrument0 = note - 36;
+        pitch = 60;
+    }
+    else if (mode == NotesOff)
+        return;
+    else if (mode == NotesChannels && channel < std::min(data_->channels, kMaxChannels))
+    {
+        as = channel;
+        if (const int last = lastInstrument_[static_cast<std::size_t>(channel)]; last >= 0)
+            instrument0 = last;
+    }
+    if (instrument0 < 0 || instrument0 >= count || pitch < 0 || pitch > 119)
+        return;
+    try
+    {
+        const int v = playNote(instrument0, pitch, velocity / 127.0, as);
+        if (v >= 0)
+        {
+            voice = static_cast<std::int16_t>(v);
+            ++liveCount_[static_cast<std::size_t>(channel)];
+            applyVoicePitch(v, voicePitch(channel));
+        }
+    }
+    catch (...)
+    {
+    }
+}
+
+float Player::voicePitch(int channel) const noexcept
+{
+    const auto c = static_cast<std::size_t>(channel);
+    const float vibrato = mod_[c] > 0 ? 0.5f * mod_[c] * std::sin(lfoPhase_) : 0.0f; // the mod wheel: up to ± ½ semitone
+    return std::exp2((bend_[c] + vibrato) / 12.0f);
+}
+
+void Player::applyVoicePitch(int voice, float factor) noexcept
+{
+    song_->each([&](Stem& s) { s.p->set_voice_pitch(voice, factor); });
+}
+
+void Player::updateVoices(int channel) noexcept
+{
+    const auto c = static_cast<std::size_t>(channel);
+    if (song_ == nullptr || liveCount_[c] <= 0)
+        return;
+    const float f = voicePitch(channel);
+    for (const auto v : liveVoice_[c])
+        if (v >= 0)
+            applyVoicePitch(v, f);
+}
+
+// Real-time messages and song position, in arrival order. Start, Continue and Song Position are taken while the
+// player is stopped or already following (so its own Start coming back through a MIDI thru is ignored); Stop while
+// following. Each needs midiSync.
+void Player::realtime(const Realtime& r) noexcept
+{
+    if (! midiSync.load(std::memory_order_relaxed))
+    {
+        following_ = false;
+        syncArm_ = ArmNone;
+        return;
+    }
+    const bool mayStart = ! playingNow_ || following_;
+    switch (r.status)
+    {
+    case 0xF8: syncPulse(r.ns, r.port); break;
+    case 0xFA: // Start: from the top, with the next pulse
+    case 0xFB: // Continue: from here (Song Position may have moved it), with the next pulse
+        if (! mayStart || song_ == nullptr)
+            break;
+        if (playingNow_)
+            pausePlaying(false);
+        if (r.status == 0xFA)
+        {
+            stopLoop(false);
+            returnPending_ = false;
+            pendingJump_ = -1;
+            queuedOrder_.store(-1);
+            rewindSong();
+            startedOnce_ = false;
+        }
+        following_ = true;
+        syncPort_ = r.port;
+        syncArm_ = r.status == 0xFA ? ArmStart : ArmContinue;
+        break;
+    case 0xFC: // Stop: pause where it is (a Continue goes on from here)
+        if (following_ && (syncPort_ < 0 || r.port == syncPort_))
+        {
+            if (playingNow_)
+                pausePlaying(false);
+            following_ = false;
+            syncArm_ = ArmNone;
+        }
+        break;
+    case 0xF2: // Song Position, in MIDI beats (sixteenths)
+        if (playingNow_ || song_ == nullptr)
+            break;
+        {
+            const long rows = static_cast<long>(r.value) * std::max(1, rowsPerBeat.load(std::memory_order_relaxed)) / 4;
+            int order = validOrder(0), row = 0;
+            advance(order, row, rows);
+            stopLoop(false);
+            returnPending_ = false;
+            pendingJump_ = -1;
+            queuedOrder_.store(-1);
+            seekNow(order, row);
+            startedOnce_ = true; // a Continue, not a Start, goes on from here
+        }
+        break;
+    default: break;
+    }
+}
+
+// A clock pulse: the filtered pulse time and period (a second-order loop that smooths the arrival jitter), the row
+// grid (every pulsesPerRow() pulses from the origin), and an armed start that is due.
+void Player::syncPulse(std::uint64_t ns, int port) noexcept
+{
+    const double t = static_cast<double>(ns);
+    const bool gap = pulseRawNs_ == 0 || ns <= pulseRawNs_ || ns - pulseRawNs_ > 300000000ull; // under ~8 BPM: stopped
+    if (! gap && syncPort_ >= 0 && port != syncPort_ && following_)
+        return; // a second clock on another port: the one we follow wins
+    if (gap)
+    {
+        pulseNs_ = t;
+        pulsePeriod_ = 0;
+        gridKnown_ = false;
+    }
+    else
+    {
+        const double interval = t - static_cast<double>(pulseRawNs_);
+        if (pulsePeriod_ <= 0)
+        {
+            pulsePeriod_ = interval;
+            pulseNs_ = t;
+        }
+        else
+        {
+            const double predicted = pulseNs_ + pulsePeriod_;
+            const double err = t - predicted;
+            if (std::fabs(err) > 0.5 * pulsePeriod_) // a jump in the master's tempo or a lost pulse: start over from here
+            {
+                pulsePeriod_ = interval;
+                pulseNs_ = t;
+            }
+            else
+            {
+                pulseNs_ = predicted + 0.3 * err;
+                pulsePeriod_ = std::max(1e5, pulsePeriod_ + 0.05 * err);
+            }
+        }
+    }
+    pulseRawNs_ = ns;
+    if (syncPort_ < 0 || ! following_)
+        syncPort_ = port;
+    ++pulseIndex_;
+    const int ppr = pulsesPerRow();
+    if (syncArm_ != ArmNone && following_)
+    {
+        // Join (PLAY while a clock runs): on the next beat of a known grid, else on this pulse.
+        const bool due = syncArm_ != ArmJoin || ! gridKnown_ || (pulseIndex_ - gridOrigin_) % 24 == 0;
+        if (due)
+        {
+            if (syncArm_ != ArmJoin || ! gridKnown_)
+                gridOrigin_ = pulseIndex_;
+            gridKnown_ = true;
+            syncArm_ = ArmNone;
+            syncIntegral_ = 0;
+            startPlaying();
+        }
+    }
+    if (((pulseIndex_ - gridOrigin_) % ppr + ppr) % ppr == 0)
+        gridNs_ = pulseNs_;
+}
+
+// A row started while following, heard at `audibleNs`: the tempo factor that makes this row end on the clock's grid
+// (a grid row = the clock's period × pulses per row), corrected by the phase to the nearest grid point (half of it per
+// row, plus an integral of it). When the row's first tick already ran at the old factor (`firstTickDone`), the new
+// factor is for its remaining ticks, so rows of only a few ticks (speed changes on every row) land on the grid too.
+void Player::syncRow(double audibleNs, bool firstTickDone) noexcept
+{
+    if (! playingNow_ || pulsePeriod_ <= 0 || song_ == nullptr || ! gridKnown_)
+        return;
+    const double gridRow = pulsePeriod_ * pulsesPerRow();
+    const double nominal = song_->dry.p->get_row_seconds() * 1e9;
+    if (gridRow <= 0 || nominal <= 0)
+        return;
+    double e = std::fmod(audibleNs - 1e6 * midiSyncOffsetMs.load(std::memory_order_relaxed) - gridNs_, gridRow);
+    if (e > 0.5 * gridRow)
+        e -= gridRow;
+    else if (e < -0.5 * gridRow)
+        e += gridRow;
+    // Proportional: half the phase per row; integral: what the module's nominal row length misses (tick rounding,
+    // tempo slides, fine delays), so the phase settles at zero instead of at a constant offset.
+    syncIntegral_ = std::clamp(syncIntegral_ + 0.1 * e / gridRow, -0.1, 0.1);
+    const double correction = std::clamp(0.5 * e / gridRow + syncIntegral_, -0.15, 0.15);
+    const double want = gridRow * (1.0 - correction); // this row's length
+    const int speed = std::max(1, song_->dry.m->get_current_speed());
+    const double tick = nominal / speed; // at factor 1
+    double factor = tick * speed / want;
+    if (firstTickDone && speed > 1 && appliedTempo_ > 0)
+    {
+        const double rest = want - tick / appliedTempo_;
+        factor = rest > 0.25 * tick * (speed - 1) ? tick * (speed - 1) / rest : 4.0;
+    }
+    syncFactor_ = static_cast<float>(std::clamp(factor, 0.25, 4.0));
+    syncError_.store(static_cast<float>(e / 1e6), std::memory_order_relaxed);
+    if (syncFactor_ != appliedTempo_)
+    {
+        song_->each([&](Stem& s) {
+            try
+            {
+                s.i->set_tempo_factor(syncFactor_);
+            }
+            catch (...)
+            {
+            }
+        });
+        appliedTempo_ = syncFactor_;
+    }
+}
+
+void Player::startPlaying() noexcept
+{
+    if (song_ == nullptr || playingNow_)
+        return;
+    playingNow_ = true;
+    if (midiClock.load(std::memory_order_relaxed) && ! following_)
+    {
+        if (! startedOnce_ && order_ == 0 && row_ == 0)
+            midiByte(frame_, 0xFA);
+        else
+        {
+            midiSongPosition(frame_);
+            midiByte(frame_, 0xFB);
+        }
+    }
+    startedOnce_ = true;
+    rowFrame_ = 0; // no row length from before the pause
+    rowStartNs_.store(periodNs_ + static_cast<std::uint64_t>(outputLatency() / sampleRate_ * 1e9), std::memory_order_release);
+    if (following_)
+        syncRow(static_cast<double>(periodNs_) + outputLatency() / sampleRate_ * 1e9, false);
+    clockRow(frame_);
+    midiRowNotes(pattern_, row_, frame_);
+    planNext(); // with a valid plan from before the pause (else after the first read)
+}
+
+void Player::pausePlaying(bool stop) noexcept
+{
+    if (playingNow_ && midiClock.load(std::memory_order_relaxed) && ! following_)
+    {
+        flushPulses(frame_);
+        midiByte(frame_, 0xFC);
+    }
+    playingNow_ = false;
+    pulsesLeft_ = 0;
+    midiAllNotesOff(frame_);
+    if (stop && song_ != nullptr)
+    {
+        if (stripMode_ == StripRepeat)
+            stripLatch_ = false; // a held REPEAT does not start again with the next PLAY
+        stopLoop(false);
+        returnPending_ = false;
+        pendingJump_ = -1;
+        queuedOrder_.store(-1);
+        rewindSong();
+        startedOnce_ = false;
+    }
+}
+
+// Ends a live voice. Sample-based modules (MOD, S3M) have no release: a looping sample would sound on after a key-off,
+// so the voice stops (libopenmpt ramps it out). Instruments get a key-off (their release envelope), and a stop
+// kReleaseSeconds later in case they sustain without one.
 void Player::noteOff(int channel) noexcept
 {
+    const bool samples = data_ == nullptr || data_->numInstruments == 0;
     song_->each([&](Stem& s) {
         try
         {
-            if (s.i2 != nullptr)
+            if (s.i2 != nullptr && ! samples)
                 s.i2->note_off(channel);
             else
                 s.i->stop_note(channel);
@@ -663,6 +1012,38 @@ void Player::noteOff(int channel) noexcept
         {
         }
     });
+    if (! samples)
+    {
+        released_[static_cast<std::size_t>(releasedHead_)] = {static_cast<std::int16_t>(channel),
+                                                              frame_ + static_cast<std::uint64_t>(kReleaseSeconds * sampleRate_)};
+        releasedHead_ = (releasedHead_ + 1) % static_cast<int>(released_.size());
+    }
+}
+
+// Released instrument voices whose time is up: stopped, unless a live note took the voice since.
+void Player::endReleased() noexcept
+{
+    for (auto& r : released_)
+    {
+        if (r.voice < 0 || r.dueFrame > frame_)
+            continue;
+        bool live = false;
+        for (std::size_t c = 0; c < liveVoice_.size() && ! live; ++c)
+            live = liveCount_[c] > 0 && std::find(liveVoice_[c].begin(), liveVoice_[c].end(), r.voice) != liveVoice_[c].end();
+        for (const int p : padChannel_)
+            live = live || p == r.voice;
+        if (! live && song_ != nullptr)
+            song_->each([&](Stem& s) {
+                try
+                {
+                    s.i->stop_note(r.voice);
+                }
+                catch (...)
+                {
+                }
+            });
+        r.voice = -1;
+    }
 }
 
 void Player::padOff(int pad) noexcept
@@ -724,48 +1105,30 @@ void Player::handle(const Event& e) noexcept
         }
         break;
     case Event::Play:
-        if (song_ == nullptr || playingNow_)
+        if (song_ == nullptr || playingNow_ || syncArm_ != ArmNone)
             break;
-        playingNow_ = true;
-        if (midiClock.load(std::memory_order_relaxed))
+        // PLAY while an external clock runs: follow it, starting on its next beat (or pulse).
+        if (midiSync.load(std::memory_order_relaxed) && pulseRawNs_ != 0 && periodNs_ > pulseRawNs_
+            && periodNs_ - pulseRawNs_ < 300000000ull)
         {
-            if (! startedOnce_ && order_ == 0 && row_ == 0)
-                midiByte(frame_, 0xFA);
-            else
-            {
-                midiSongPosition(frame_);
-                midiByte(frame_, 0xFB);
-            }
+            following_ = true;
+            syncArm_ = ArmJoin;
+            break;
         }
-        startedOnce_ = true;
-        rowFrame_ = 0; // no row length from before the pause
-        rowStartNs_.store(periodNs_ + static_cast<std::uint64_t>(outputLatency() / sampleRate_ * 1e9),
-                          std::memory_order_release);
-        clockRow(frame_);
-        midiRowNotes(pattern_, row_, frame_);
-        planNext(); // with a valid plan from before the pause (else after the first read)
+        following_ = false;
+        startPlaying();
         break;
     case Event::Pause:
     case Event::Stop:
-        if (playingNow_ && midiClock.load(std::memory_order_relaxed))
+        if (syncArm_ != ArmNone && ! playingNow_) // armed for an external start: cancel it
         {
-            flushPulses(frame_);
-            midiByte(frame_, 0xFC);
+            syncArm_ = ArmNone;
+            following_ = false;
+            if (e.kind == Event::Pause)
+                break;
         }
-        playingNow_ = false;
-        pulsesLeft_ = 0;
-        midiAllNotesOff(frame_);
-        if (e.kind == Event::Stop && song_ != nullptr)
-        {
-            if (stripMode_ == StripRepeat)
-                stripLatch_ = false; // a held REPEAT does not start again with the next PLAY
-            stopLoop(false);
-            returnPending_ = false;
-            pendingJump_ = -1;
-            queuedOrder_.store(-1);
-            rewindSong();
-            startedOnce_ = false;
-        }
+        pausePlaying(e.kind == Event::Stop);
+        following_ = false;
         break;
     case Event::Jump:
         if (song_ == nullptr)
@@ -802,29 +1165,41 @@ void Player::handle(const Event& e) noexcept
             masksDirty_ = true;
         }
         break;
-    case Event::Note:
+    case Event::Note: liveNote(e.c, e.a & 127, e.b); break;
+    case Event::Bend:
     {
-        if (song_ == nullptr)
-            break;
-        auto& ch = noteChannel_[static_cast<std::size_t>(e.a & 127)];
-        try
+        const float semitones = static_cast<float>(e.b) / 8192.0f * std::clamp(midiBendRange.load(std::memory_order_relaxed), 0.0f, 24.0f);
+        if (e.a == midiControlChannel.load(std::memory_order_relaxed) - 1)
+            globalBend_ = semitones;
+        else
         {
-            if (ch >= 0)
-            {
-                noteOff(ch);
-                ch = -1;
-            }
-            const int count = data_->numInstruments > 0 ? data_->numInstruments : data_->numSamples;
-            const int inst = instrument.load(std::memory_order_relaxed);
-            if (e.b > 0 && inst >= 0 && inst < count && e.a < 120)
-                ch = playNote(inst, e.a, e.b / 127.0);
-        }
-        catch (...)
-        {
-            ch = -1;
+            bend_[static_cast<std::size_t>(e.a & 15)] = semitones;
+            updateVoices(e.a & 15);
         }
         break;
     }
+    case Event::Mod:
+        if (e.a == midiControlChannel.load(std::memory_order_relaxed) - 1)
+            globalMod_ = static_cast<float>(e.b) / 127.0f;
+        else
+        {
+            mod_[static_cast<std::size_t>(e.a & 15)] = static_cast<float>(e.b) / 127.0f;
+            updateVoices(e.a & 15);
+        }
+        break;
+    case Event::AllOff:
+        if (song_ != nullptr)
+            for (std::size_t c = 0; c < liveVoice_.size(); ++c)
+            {
+                for (auto& v : liveVoice_[c])
+                    if (v >= 0)
+                    {
+                        noteOff(v);
+                        v = -1;
+                    }
+                liveCount_[c] = 0;
+            }
+        break;
     }
 }
 
@@ -939,8 +1314,11 @@ void Player::applySettings() noexcept
 {
     if (song_ == nullptr)
         return;
-    const float tempo = std::clamp(tempoFactor.load(std::memory_order_relaxed) * stripTempo_, 0.25f, 4.0f);
-    const float pitch = std::exp2(std::clamp(pitchSemitones.load(std::memory_order_relaxed) + stripPitch_, -24.0f, 24.0f) / 12.0f);
+    // Following an external clock, the clock sets the tempo (syncRow); TEMPO and the strip's tempo bend wait.
+    const float tempo = following_ && playingNow_ ? syncFactor_
+                                                  : std::clamp(tempoFactor.load(std::memory_order_relaxed) * stripTempo_, 0.25f, 4.0f);
+    const float vibrato = globalMod_ > 0 ? 0.5f * globalMod_ * std::sin(lfoPhase_) : 0.0f; // the control channel's mod wheel
+    const float pitch = std::exp2(std::clamp(pitchSemitones.load(std::memory_order_relaxed) + stripPitch_ + globalBend_ + vibrato, -24.0f, 24.0f) / 12.0f);
     const int sep = std::clamp(stereoSeparation.load(std::memory_order_relaxed), 0, 200);
     int interp = interpolation.load(std::memory_order_relaxed);
     interp = interp >= 8 ? 8 : interp >= 4 ? 4 : interp >= 2 ? 2 : 1;
@@ -1098,6 +1476,22 @@ void Player::process(const platform::AudioIO& io) noexcept
             adopt(song);
         for (Event e; events_.pop(e);)
             handle(e);
+        for (Realtime r; realtime_.pop(r);)
+            realtime(r);
+    }
+    if (song_ != nullptr)
+        endReleased();
+    // The mod wheels' vibrato (5.5 Hz), on the voices of each MIDI channel whose wheel is up.
+    lfoPhase_ = std::fmod(lfoPhase_ + static_cast<float>(2.0 * 3.14159265358979 * 5.5 * io.frames / sampleRate_), 6.2831853f);
+    for (int c = 0; c < 16; ++c)
+        if (mod_[static_cast<std::size_t>(c)] > 0)
+            updateVoices(c);
+    // Following: the clock's tempo, the state.
+    {
+        const bool alive = pulseRawNs_ != 0 && periodNs_ > pulseRawNs_ && periodNs_ - pulseRawNs_ < 300000000ull && pulsePeriod_ > 0;
+        clockBpm_.store(alive ? static_cast<float>(60e9 / (24.0 * pulsePeriod_)) : 0.0f, std::memory_order_relaxed);
+        const int state = ! following_ ? SyncInternal : syncArm_ != ArmNone ? SyncWaiting : alive ? SyncLocked : SyncLost;
+        syncState_.store(state, std::memory_order_relaxed);
     }
     const bool notes = midiNotes.load(std::memory_order_relaxed);
     if (midiNotesWas_ && ! notes) // REC off: end the notes that are on
@@ -1172,7 +1566,8 @@ void Player::process(const platform::AudioIO& io) noexcept
     const int overHoldFrames = static_cast<int>(0.5 * sampleRate_);
 
     const float volume = mainVolume.load(std::memory_order_relaxed);
-    const float gain = std::pow(10.0f, gainDb.load(std::memory_order_relaxed) / 20.0f) * volume * volume;
+    const float midiVol = std::clamp(midiVolume.load(std::memory_order_relaxed), 0.0f, 1.0f);
+    const float gain = std::pow(10.0f, gainDb.load(std::memory_order_relaxed) / 20.0f) * volume * volume * midiVol * midiVol;
     float peakL = 0, peakR = 0;
 
     // The single outs: OUT 3-4, 5-6, 7-8 (jack j on port 1 + j / 2, left for even j). Gain and the strip's volume act on
@@ -1185,7 +1580,7 @@ void Player::process(const platform::AudioIO& io) noexcept
         jackOut[j] = port < io.numOutPorts ? io.out[2 * port + (j & 1)] : nullptr;
         anyJack = anyJack || jackOut[j] != nullptr;
     }
-    const float jackGain = std::pow(10.0f, gainDb.load(std::memory_order_relaxed) / 20.0f);
+    const float jackGain = std::pow(10.0f, gainDb.load(std::memory_order_relaxed) / 20.0f) * midiVol * midiVol;
     const int nOut = song_ != nullptr ? static_cast<int>(song_->outs.size()) : 0;
     // Work for the jacks only while something is on them (an out stem in use, a utility signal); else silence.
     bool jackWork = false;

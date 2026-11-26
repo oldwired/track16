@@ -205,33 +205,51 @@ void Midi::read(Input& in)
             in.gone = true;
             return;
         }
+        const std::uint64_t ns = nowNs(); // the bytes of one read arrived together
         for (int i = 0; i < n; ++i)
         {
             const std::uint8_t b = buffer[i];
-            if (b >= 0xF8)
-                continue; // real-time
+            if (b >= 0xF8) // real-time: may come between any two bytes
+            {
+                if (b == 0xF8 || b == 0xFA || b == 0xFB || b == 0xFC)
+                    player_.midiRealtime(b, ns, in.index);
+                if (b == 0xFA || b == 0xFB || b == 0xFC)
+                    toUi_.push({{b, 0, 0}, 1, in.index});
+                continue;
+            }
             if (b & 0x80)
             {
                 sysex = b == 0xF0;
-                status = b < 0xF0 ? b : 0;
+                status = b == 0xF2 || b == 0xF3 || b < 0xF0 ? b : 0; // song position / select; no running status after
                 have = 0;
                 continue;
             }
             if (sysex || status == 0)
                 continue;
             data[have++] = b;
-            const std::uint8_t type = status & 0xF0;
-            const std::uint8_t need = (type == 0xC0 || type == 0xD0) ? 1 : 2;
+            const std::uint8_t type = status < 0xF0 ? status & 0xF0 : status;
+            const std::uint8_t need = (type == 0xC0 || type == 0xD0 || type == 0xF3) ? 1 : 2;
             if (have < need)
                 continue;
             have = 0;
+            const int channel = status & 0x0F;
             switch (type)
             {
-            case 0x90: player_.midiNote(data[0], data[1]); break;
-            case 0x80: player_.midiNote(data[0], 0); break;
+            case 0x90: player_.midiNote(channel, data[0], data[1]); break;
+            case 0x80: player_.midiNote(channel, data[0], 0); break;
+            case 0xE0: player_.midiBend(channel, data[0] | (data[1] << 7)); break;
+            case 0xB0:
+                if (data[0] == 1)
+                    player_.midiMod(channel, data[1]);
+                else if (data[0] == 120 || data[0] == 123) // all sound off, all notes off
+                    player_.midiAllNotesOff();
+                break;
+            case 0xF2: player_.midiRealtime(0xF2, ns, in.index, data[0] | (data[1] << 7)); break;
             default: break;
             }
             toUi_.push({{status, data[0], data[1]}, need == 1 ? std::uint8_t {2} : std::uint8_t {3}, in.index});
+            if (status >= 0xF0)
+                status = 0;
         }
     }
 }

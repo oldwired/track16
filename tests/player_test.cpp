@@ -14,6 +14,8 @@
 #include <cstdio>
 #include <cstdlib>
 #include <string>
+#include <tuple>
+#include <utility>
 #include <vector>
 
 using namespace app;
@@ -631,6 +633,185 @@ void testLayoutText()
           "tap rules");
 }
 
+// An external MIDI clock: pulses at `bpm` with ±0.4 ms arrival jitter, fed to the player before each period whose
+// start they precede. Rows (their start at the jacks, rowStartNs) are checked against the grid of every 6th pulse
+// (rows_per_beat 4) counted from the first pulse after Start.
+struct Clock
+{
+    Rig& rig;
+    double bpm = 120, next = 0; // the next pulse's true time (ns)
+    long sent = 0;
+    unsigned seed = 1;
+    int port = 0;
+    double period() const { return 60e9 / (24.0 * bpm); }
+    double jitter() { return (static_cast<double>((seed = seed * 1103515245u + 12345u) >> 16 & 0x7FFF) / 32767.0 - 0.5) * 0.8e6; }
+    void message(std::uint8_t status, int value = 0) { rig.player.midiRealtime(status, rig.ns, port, value); }
+    // Runs `seconds` period by period; pulses only while `ticking`. Returns the largest |row start − nearest grid
+    // point| (ns) of the rows that started after `settle` seconds, and the rows seen then.
+    std::pair<double, long> run(double seconds, double settle = 1e9, bool ticking = true, double gridOrigin = -1)
+    {
+        double worst = 0;
+        long rows = 0;
+        std::uint64_t lastStart = rig.player.rowStartNs();
+        const double end = static_cast<double>(rig.ns) + seconds * 1e9, from = static_cast<double>(rig.ns) + settle * 1e9;
+        while (static_cast<double>(rig.ns) < end)
+        {
+            while (ticking && next <= static_cast<double>(rig.ns))
+            {
+                rig.player.midiRealtime(0xF8, static_cast<std::uint64_t>(next + jitter()), port);
+                next += period();
+                ++sent;
+            }
+            rig.run(1.5 * kPeriod / kRate); // one period
+            const std::uint64_t start = rig.player.rowStartNs();
+            if (start != lastStart && rig.player.playing() && static_cast<double>(rig.ns) > from && gridOrigin >= 0)
+            {
+                const double grid = 6 * period();
+                double e = std::fmod(static_cast<double>(start) - gridOrigin, grid);
+                e = e > grid / 2 ? e - grid : e < -grid / 2 ? e + grid : e;
+                worst = std::max(worst, std::fabs(e));
+                ++rows;
+            }
+            lastStart = start;
+        }
+        return {worst, rows};
+    }
+};
+
+void testSync(const LibraryEntry& e)
+{
+    std::printf("== MIDI clock in: %s\n", e.name.c_str());
+    Rig rig(false);
+    rig.run(0.05);
+    std::string error;
+    rig.player.load(loadSong(e.path, false, 0, kRate, 100, 4, error));
+    rig.run(0.05);
+    Clock clock {rig};
+    clock.next = static_cast<double>(rig.ns) + 1e6;
+    clock.run(0.5, 1e9, true); // a running clock before Start: nothing plays
+    CHECK(! rig.player.playing() && rig.player.syncState() == Player::SyncInternal, "playing before Start");
+    CHECK(std::fabs(rig.player.clockBpm() - 120.0f) < 0.5f, "clock bpm %.2f", static_cast<double>(rig.player.clockBpm()));
+
+    // Start: from the top with the next pulse; the rows lock onto the grid of that pulse; no clock of our own.
+    const int clocksOut = rig.midi.count(0xF8);
+    clock.message(0xFA);
+    const double origin = clock.next; // the first pulse after Start
+    auto [worst, rows] = clock.run(10.0, 4.0, true, origin);
+    CHECK(rig.player.playing() && rig.player.syncState() == Player::SyncLocked, "not following after Start (state %d)", rig.player.syncState());
+    CHECK(worst < 3e6, "rows off the clock's grid by %.2f ms", worst / 1e6);
+    CHECK(rows > 6 * 8 / 2 && rows <= 6 * 8 * 2 + 2, "%ld rows in 6 s at 120 BPM", rows); // pattern delays make fewer
+    CHECK(rig.midi.count(0xF8) == clocksOut, "sent %d clocks while following", rig.midi.count(0xF8) - clocksOut);
+    std::printf("  120 BPM: worst %.2f ms over %ld rows, error now %.2f ms\n", worst / 1e6, rows, static_cast<double>(rig.player.syncErrorMs()));
+
+    // The master speeds up: the grid keeps its phase (the pulses go on), the rows follow.
+    const double sinceOrigin = (clock.next - origin) / clock.period(); // pulses since the origin
+    clock.bpm = 141;
+    const double origin2 = clock.next - std::fmod(sinceOrigin, 6.0) * clock.period(); // the grid point before the next pulse
+    std::tie(worst, rows) = clock.run(8.0, 4.0, true, origin2);
+    CHECK(worst < 3e6 && std::fabs(rig.player.clockBpm() - 141.0f) < 0.5f, "141 BPM: worst %.2f ms, clock %.2f", worst / 1e6,
+          static_cast<double>(rig.player.clockBpm()));
+    std::printf("  141 BPM: worst %.2f ms over %ld rows\n", worst / 1e6, rows);
+
+    // Stop pauses where it is; Song Position moves it; Continue goes on from there with the next pulse.
+    clock.message(0xFC);
+    clock.run(0.2);
+    CHECK(! rig.player.playing() && rig.player.syncState() == Player::SyncInternal, "Stop: playing %d state %d", rig.player.playing(),
+          rig.player.syncState());
+    clock.message(0xF2, 16); // 16 sixteenths = 16 rows at 4 rows per beat
+    clock.run(0.05);
+    int order = 0, row = 0;
+    advance(*rig.player.current(), order, row, 16);
+    CHECK(rig.player.position().order == order && rig.player.position().row == row, "song position → %d/%d, want %d/%d",
+          rig.player.position().order, rig.player.position().row, order, row);
+    clock.message(0xFB);
+    clock.run(1.0);
+    CHECK(rig.player.playing() && rig.player.syncState() == Player::SyncLocked, "Continue: playing %d", rig.player.playing());
+
+    // The clock stops without a Stop: it plays on at the last tempo (state "lost"); the panel's STOP ends following.
+    clock.run(1.0, 1e9, false);
+    CHECK(rig.player.playing() && rig.player.syncState() == Player::SyncLost, "clock gone: playing %d state %d", rig.player.playing(),
+          rig.player.syncState());
+    rig.player.stop();
+    clock.run(0.1, 1e9, false);
+    CHECK(! rig.player.playing() && rig.player.syncState() == Player::SyncInternal, "panel STOP while following");
+
+    // Our own Start coming back (a MIDI thru) while we play on our own clock is ignored.
+    rig.player.play();
+    clock.run(0.3, 1e9, false);
+    clock.message(0xFA);
+    clock.run(0.3, 1e9, false);
+    CHECK(rig.player.playing() && rig.player.syncState() == Player::SyncInternal, "an echoed Start took over");
+    rig.player.stop();
+    clock.run(0.1, 1e9, false);
+
+    // PLAY while a clock runs: joins it on its next pulse (no grid known after the gap) and follows.
+    clock.next = static_cast<double>(rig.ns) + 1e6;
+    clock.run(0.3);
+    rig.player.play();
+    clock.run(2.0);
+    CHECK(rig.player.playing() && rig.player.syncState() == Player::SyncLocked, "PLAY with a clock: state %d", rig.player.syncState());
+    rig.player.stop();
+
+    // midi_sync=0: Start does nothing.
+    rig.player.midiSync = false;
+    clock.run(0.2);
+    clock.message(0xFA);
+    clock.run(0.5);
+    CHECK(! rig.player.playing(), "Start with midi_sync=0");
+    CHECK(rig.finite, "non-finite");
+}
+
+// MIDI notes: by channel they sound where that module channel plays (here: OUT 3, all channels muted so only the
+// live voice is heard), the kit channel plays instrument 1 on MAIN, the control channel plays nothing; bend and the
+// mod wheel keep it finite; all-notes-off ends them.
+void testMidiNotes(const LibraryEntry& e)
+{
+    std::printf("== MIDI notes in: %s\n", e.name.c_str());
+    Rig rig(false, true);
+    rig.run(0.05);
+    std::string error;
+    rig.player.load(loadSong(e.path, false, 2, kRate, 100, 4, error));
+    outs::Layout layout;
+    layout.dest[0] = outs::mono(0);
+    rig.player.setOuts(layout);
+    rig.player.muteMask = ~0ull;
+    rig.player.play();
+    rig.run(0.5);
+    const auto quiet = [&](double s) {
+        rig.jackEnergy = {};
+        rig.energy = 0;
+        rig.run(s);
+        return std::make_pair(rig.energy, rig.jackEnergy[0]);
+    };
+    const auto [main0, jack0] = quiet(0.3);
+    CHECK(main0 < 1e-6 && jack0 < 1e-6, "muted module not silent (%.3g, %.3g)", main0, jack0);
+
+    rig.player.midiNote(0, 60, 120); // MIDI channel 1 → module channel 1 → OUT 3
+    const auto [main1, jack1] = quiet(0.3);
+    CHECK(jack1 > 1e-3 && main1 < 1e-6, "channel 1's note: OUT 3 %.3g, MAIN %.3g", jack1, main1);
+    rig.player.midiBend(0, 16383);
+    rig.player.midiMod(0, 127);
+    quiet(0.3);
+    rig.player.midiNote(0, 60, 0);
+    rig.player.midiBend(0, 8192);
+    rig.player.midiMod(0, 0);
+    quiet(1.0);
+
+    rig.player.midiNote(9, 36, 120); // the kit channel: instrument 1, on MAIN
+    const auto [main2, jack2] = quiet(0.3);
+    CHECK(main2 > 1e-3, "kit note on MAIN %.3g", main2);
+    rig.player.midiAllNotesOff();
+    quiet(1.5);
+    const auto [main3, jack3] = quiet(0.3);
+    CHECK(main3 < 1e-4 && jack3 < 1e-4, "after all notes off: MAIN %.3g OUT 3 %.3g", main3, jack3);
+
+    rig.player.midiNote(15, 60, 120); // the control channel: the UI's remote pads, no note here
+    const auto [main4, jack4] = quiet(0.3);
+    CHECK(main4 < 1e-6 && jack4 < 1e-6, "control channel played (%.3g, %.3g)", main4, jack4);
+    rig.player.midiNote(15, 60, 0);
+    CHECK(rig.finite, "non-finite");
+}
+
 void testNoLoop(const LibraryEntry& e)
 {
     std::printf("== no filter loop: %s\n", e.name.c_str());
@@ -663,6 +844,9 @@ int main(int argc, char** argv)
     testLayoutText();
     for (const auto& e : library.entries())
         testOuts(e);
+    for (const auto& e : library.entries())
+        testSync(e);
+    testMidiNotes(library.entries().front());
     std::printf(failures == 0 ? "ALL PASSED\n" : "%d FAILED\n", failures);
     return failures == 0 ? 0 : 1;
 }

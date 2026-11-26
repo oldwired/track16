@@ -31,6 +31,11 @@ Marked "Track16" in the source; reapply them after an update.
 - `soundlib/Sndfile.h/.cpp` (`ResetPlayPos(bool)`) and `track16_position::rewind`: the rewind skips rebuilding the
   visited-rows table (it allocates and walks the whole song; about 2.5 ms per instance on the unit, so STOP with six
   instances dropped audio). With endless repetition the table is not consulted.
+- `soundlib/ModChannel.h` (`track16Pitch`), `soundlib/Sndmix.cpp` (`ReadNote`: the increment, after the global
+  pitch factor), `play_note` (resets it) and `track16_position::set_voice_pitch`: a pitch factor per voice, for MIDI
+  pitch bend and vibrato on live notes (`set_note_finetune` reaches only ±1 semitone on sample-based modules).
+- `track16_position::get_row_seconds`: the row length from the current speed and tempo (`CSoundFile::GetRowDuration`)
+  without the tempo factor, for following an external MIDI clock.
 - `soundlib/Tables.cpp` (`CResampler::InitializeTablesFromScratch`): the windowed-FIR table is rebuilt only when its
   cutoff or window type changes, not on every interpolation-mode change (the INTERP knob stalled the audio thread
   for about 130 ms on the unit).

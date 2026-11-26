@@ -161,6 +161,9 @@ struct ModChannel
 	// Track16 addition (not upstream): the voice plays on as usual (envelopes, position, NNA, volumes) but the mixer
 	// leaves it out, so several instances of one module stay in lockstep while each mixes other channels.
 	bool track16Silent = false;
+	// Track16 addition (not upstream): a pitch factor for this voice alone (16.16 fixed point, 65536 = none), applied
+	// with the global pitch factor; MIDI pitch bend and vibrato on live notes. play_note resets it.
+	uint32 track16Pitch = 65536;
 
 	//-->Variables used to make user-definable tuning modes work with pattern effects.
 	//If true, freq should be recalculated in ReadNote() on first tick.

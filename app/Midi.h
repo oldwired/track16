@@ -1,7 +1,9 @@
 // MIDI in and out through ALSA raw MIDI (hw/common/MidiPort.h): the unit's DIN MIDI and USB MIDI ports.
 //
-//   in    every input port is opened, each on its own reader thread; note on/off go straight to the player (they play
-//         the selected instrument), every message also to the UI's monitor (a lock-free queue drained by poll())
+//   in    every input port is opened, each on its own reader thread; notes, pitch bend, the mod wheel, all-notes-off,
+//         the clock, Start / Continue / Stop and Song Position go straight to the player (timestamped on arrival);
+//         every message but the clock also to the UI (a lock-free queue drained by poll()): the control channel's
+//         remote pads and controllers, program change, song select
 //   out   the player's clock and notes arrive timestamped from the audio thread (MidiScheduler::schedule); a sender
 //         thread writes each at its time to the output ports `outputs` selects ("din", "usb", "all": by port name);
 //         send() writes at once (UI thread)

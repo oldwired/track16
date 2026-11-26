@@ -270,6 +270,7 @@ namespace openmpt {
 		OpenMPT::ModChannel &chn = m_sndFile->m_PlayState.Chn[free_channel];
 		chn.Reset( OpenMPT::ModChannel::resetTotal, *m_sndFile, OpenMPT::CHANNELINDEX_INVALID, OpenMPT::CHN_MUTE );
 		chn.nMasterChn = 0;	// remove NNA association
+		chn.track16Pitch = 65536;	// Track16 (not upstream): no pitch factor left from the voice's last note
 		chn.nNewNote = chn.nLastNote = static_cast<std::uint8_t>(note);
 		chn.ResetEnvelopes();
 		m_sndFile->InstrumentChange(m_sndFile->m_PlayState, free_channel, instrument + 1);
@@ -408,6 +409,18 @@ namespace openmpt {
 				m_sndFile->m_PlayState.Chn[i].track16Silent = silent;
 			}
 		}
+	}
+
+	void module_ext_impl::set_voice_pitch( std::int32_t channel, double factor ) {
+		if ( channel < 0 || channel >= static_cast<std::int32_t>( OpenMPT::MAX_CHANNELS ) ) {
+			return;
+		}
+		const double f = OpenMPT::Clamp( factor, 0.25, 4.0 );
+		m_sndFile->m_PlayState.Chn[channel].track16Pitch = static_cast<std::uint32_t>( f * 65536.0 + 0.5 );
+	}
+
+	double module_ext_impl::get_row_seconds() const {
+		return m_sndFile->GetRowDuration( m_sndFile->m_PlayState.m_nMusicTempo, m_sndFile->m_PlayState.m_nMusicSpeed ) / 1000.0;
 	}
 
 	/* add stuff here */

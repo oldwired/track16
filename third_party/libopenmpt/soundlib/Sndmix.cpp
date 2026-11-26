@@ -2413,6 +2413,8 @@ bool CSoundFile::ReadNote()
 			auto [ninc, freq] = GetChannelIncrement(chn, period, nPeriodFrac);
 #ifndef MODPLUG_TRACKER
 			ninc.MulDiv(m_nFreqFactor, 65536);
+			if(chn.track16Pitch != 65536)  // Track16 (not upstream): this voice's own pitch factor
+				ninc.MulDiv(chn.track16Pitch, 65536);
 #endif  // !MODPLUG_TRACKER
 			if(ninc.IsZero())
 			{

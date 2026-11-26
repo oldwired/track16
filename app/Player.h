@@ -26,6 +26,14 @@
 // one leaves. Those streams are delayed like MAIN, so they stay sample-aligned with it, and take GAIN and the strip's
 // volume but not MAIN VOLUME. A jack can carry a utility signal instead: the clean mix (MAIN's channels before the
 // filter and DRIVE), the filter's return, or a click on the beat.
+//
+// MIDI in (app/Midi.h reads the ports): notes play live voices, by MIDI channel (the voice of the module channel with
+// that number, the selected instrument, or the kit on midiKitChannel); pitch bend and the mod wheel bend them and add
+// vibrato, on midiControlChannel the whole module. With midiSync the player follows an external clock: Start,
+// Continue, Stop and Song Position move the transport, and while it follows, the tempo factor is set at every row so
+// the rows keep the clock's grid (24 / rows_per_beat pulses per row): the clock's period sets the base factor, the
+// phase between a row's start at the jacks and the nearest grid point adds a correction (a phase-locked loop). The
+// player sends no clock of its own while it follows.
 #pragma once
 
 #include "app/Outs.h"
@@ -108,7 +116,13 @@ public:
     void padRelease(int pad0, int hit) noexcept; // `hit`: which press of the pad (pushHits() counted), so a late release cannot end a newer hit
     void toggleLoopLatch() noexcept;
     void toggleFilterLatch(int channel) noexcept;
-    void midiNote(int note, int velocity) noexcept; // MIDI in: plays the selected instrument
+    // MIDI in (reader threads). Channels 0–15; a real-time message (0xF8 clock, 0xFA start, 0xFB continue, 0xFC stop)
+    // or a song position (0xF2, `value` = MIDI beats) with its arrival time on the clock of AudioIO::hostTimeNs.
+    void midiNote(int channel, int note, int velocity) noexcept;
+    void midiBend(int channel, int value14) noexcept; // 0…16383, 8192 = centre
+    void midiMod(int channel, int value) noexcept;    // the mod wheel, 0…127
+    void midiAllNotesOff() noexcept;                  // ends every MIDI-played voice
+    void midiRealtime(std::uint8_t status, std::uint64_t ns, int port, int value = 0) noexcept;
     void setStripMode(int mode) noexcept;            // StripMode; ends what the strip did in the old mode
     void setStripHold(bool on) noexcept;             // HOLD: the strip keeps its last value after the finger leaves
     void setOuts(const outs::Layout&) noexcept;      // the single outs' layout (the audio thread takes it next period)
@@ -136,6 +150,15 @@ public:
     std::atomic<int> rowsPerBeat {4};
     std::atomic<bool> midiClock {true}, midiNotes {false}, midiFollowMute {true};
     std::atomic<int> midiOffsetMs {0};
+    // MIDI in: what notes play (by channel: module channel n's voice; the selected instrument; nothing), the kit and
+    // control channels (1–16, 0 = none), the bend range in semitones, following an external clock, and an offset
+    // (ms) that moves the rows against that clock (positive: later).
+    enum MidiInNotes : int { NotesOff, NotesSelected, NotesChannels };
+    std::atomic<int> midiInNotes {NotesChannels}, midiKitChannel {10}, midiControlChannel {16};
+    std::atomic<float> midiBendRange {2.0f};
+    std::atomic<bool> midiSync {true};
+    std::atomic<int> midiSyncOffsetMs {0};
+    std::atomic<float> midiVolume {1.0f}; // the control channel's CC 7, 0…1 (squared, as the strip's volume)
     std::atomic<int> audioLatencyFrames {0}; // the output buffer (period × periods), for MIDI timing
 
     // ---- published by the audio thread ----
@@ -182,6 +205,11 @@ public:
     std::uint16_t outsUnserved() const noexcept { return outsUnserved_.load(std::memory_order_relaxed); }
     float takeJackPeak(int jack0) noexcept { return jackPeak_[static_cast<std::size_t>(jack0 % outs::kJacks)].exchange(0.0f); }
     int toneOutput() const noexcept { return toneOutPub_.load(std::memory_order_relaxed); }
+    // following an external clock: the state, the clock's tempo, the rows' phase against it (ms, + = late)
+    enum SyncState : int { SyncInternal, SyncWaiting, SyncLocked, SyncLost }; // waiting: armed for the next pulse / beat
+    int syncState() const noexcept { return syncState_.load(std::memory_order_relaxed); }
+    float clockBpm() const noexcept { return clockBpm_.load(std::memory_order_relaxed); } // 0: no clock coming in
+    float syncErrorMs() const noexcept { return syncError_.load(std::memory_order_relaxed); }
 
     // platform::AudioProcessor
     void prepare(double sampleRate, int maxDeviceFrames) override;
@@ -192,7 +220,7 @@ public:
 private:
     struct Event
     {
-        enum Kind : std::uint8_t { PadOn, PadOff, Play, Pause, Stop, Jump, LoopLatch, FilterLatch, Note, Strip, StripMode, StripHold } kind;
+        enum Kind : std::uint8_t { PadOn, PadOff, Play, Pause, Stop, Jump, LoopLatch, FilterLatch, Note, Strip, StripMode, StripHold, Bend, Mod, AllOff } kind;
         std::int16_t a = 0, b = 0, c = 0;
     };
     // Why the next row is not the module's own next row.
@@ -215,8 +243,19 @@ private:
     void stopLoop(bool returnInTime) noexcept;
     void startLoop(int rows, int owner) noexcept; // owner: the LOOP pad, or kStripOwner
     void stripApply() noexcept;                   // the strip's effect from its mode, position, touch and HOLD
-    int playNote(int instrument0, int note, double velocity); // may throw (libopenmpt); returns the dry voice
+    // may throw (libopenmpt); returns the voice. It sounds where module channel `as` plays (MAIN, the filter, a single
+    // out), or on MAIN only (as < 0).
+    int playNote(int instrument0, int note, double velocity, int as = -1);
     void noteOff(int channel) noexcept;
+    void endReleased() noexcept;
+    static constexpr double kReleaseSeconds = 2.0;
+    struct Released
+    {
+        std::int16_t voice = -1;
+        std::uint64_t dueFrame = 0;
+    };
+    std::array<Released, 64> released_ {};
+    int releasedHead_ = 0;
     // Frames from the engine to the jacks: the output buffer plus the loop-latency delay of the main path.
     double outputLatency() const noexcept { return audioLatencyFrames.load(std::memory_order_relaxed) + delayNow_; }
     int validOrder(int order) const noexcept;
@@ -232,6 +271,23 @@ private:
     void clockRow(std::uint64_t frame) noexcept;
     void flushPulses(std::uint64_t frame) noexcept;
     void clockChunk(std::uint64_t from, std::uint64_t to) noexcept;
+    int pulsesPerRow() const noexcept;
+    // MIDI in
+    struct Realtime
+    {
+        std::uint64_t ns;
+        std::uint8_t status, port;
+        std::uint16_t value;
+    };
+    void startPlaying() noexcept; // the Play event's work (also when an armed external start is due)
+    void pausePlaying(bool stop) noexcept;
+    void realtime(const Realtime&) noexcept;
+    void syncPulse(std::uint64_t ns, int port) noexcept;
+    void syncRow(double audibleNs, bool firstTickDone) noexcept; // a row started while following: its tempo factor
+    void liveNote(int channel, int note, int velocity) noexcept;
+    float voicePitch(int channel) const noexcept; // MIDI channel's bend and vibrato as a frequency factor
+    void updateVoices(int channel) noexcept;
+    void applyVoicePitch(int voice, float factor) noexcept;
     // the loop latency measurement
     void measure(const platform::AudioIO&, const float* rl, const float* rr, float* sendL, float* sendR, int n) noexcept;
     void finishMeasure(int frames) noexcept;
@@ -278,7 +334,24 @@ private:
     bool masksDirty_ = true, masksForce_ = true;
     // pads (Play / Kit): the channel each pad's note plays on
     std::array<int, 16> padChannel_ {};
-    std::array<int, 128> noteChannel_ {};
+    // MIDI-played voices per MIDI channel and note (−1 = none), the bend (semitones) and mod wheel (0…1) per channel and
+    // of the control channel, the vibrato's phase; the instrument each module channel 1–16 played last (−1 = none yet)
+    std::array<std::array<std::int16_t, 128>, 16> liveVoice_ {};
+    std::array<int, 16> liveCount_ {};
+    std::array<float, 16> bend_ {}, mod_ {};
+    float globalBend_ = 0, globalMod_ = 0, lfoPhase_ = 0;
+    std::array<std::int16_t, 16> lastInstrument_ {};
+    // following an external clock (audio thread): the filtered pulse time and period (ns), the pulse count and the
+    // pulse a row grid starts on, the last grid point, what is armed for the next pulse, the port it comes from
+    MpscQueue<Realtime, 512> realtime_;
+    bool following_ = false, gridKnown_ = false;
+    enum Arm : int { ArmNone, ArmStart, ArmContinue, ArmJoin };
+    int syncArm_ = ArmNone, syncPort_ = -1;
+    std::uint64_t pulseRawNs_ = 0;
+    double pulseNs_ = 0, pulsePeriod_ = 0, gridNs_ = 0;
+    long pulseIndex_ = 0, gridOrigin_ = 0;
+    float syncFactor_ = 1.0f;
+    double syncIntegral_ = 0;
     // settings applied to libopenmpt
     float appliedTempo_ = -1, appliedPitch_ = -1;
     int appliedSep_ = -1, appliedInterp_ = -1;
@@ -345,5 +418,7 @@ private:
     std::array<std::atomic<float>, outs::kJacks> jackPeak_ {};
     std::atomic<int> outStemsUsed_ {0}, outStemsTotal_ {0}, toneOutPub_ {-1};
     std::atomic<std::uint16_t> outsUnserved_ {0};
+    std::atomic<int> syncState_ {SyncInternal};
+    std::atomic<float> clockBpm_ {0}, syncError_ {0};
 };
 } // namespace app

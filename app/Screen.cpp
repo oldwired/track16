@@ -153,7 +153,7 @@ struct Screen::ContextBar final : juce::Component
     juce::String order, row, speed, bpm, title, info;
     std::array<juce::String, 4> modeName {"FILTER", "MUTE", "LOOP", "PLAY"}, modeSub;
     int mode = 1;
-    bool queued = false;
+    bool queued = false, externalClock = false; // externalClock: BPM is the MIDI clock's (caption EXT BPM)
 
     void paint(juce::Graphics& g) override
     {
@@ -165,7 +165,7 @@ struct Screen::ContextBar final : juce::Component
         g.fillRoundedRectangle(L::slotA, theme::radiusM);
         theme::glyph(g, theme::Glyph::Back, L::slotA.getX() + 34, L::slotA.getY() + 22, 24, c::text1);
         split(g, L::slotB, "ORDER", order, queued ? c::warn : c::text1, "ROW", row);
-        split(g, L::slotC, "SPEED", speed, c::text1, "BPM", bpm);
+        split(g, L::slotC, "SPEED", speed, c::text1, externalClock ? "EXT BPM" : "BPM", bpm);
         // The readout: title and info, in the space before the mode buttons.
         {
             juce::Graphics::ScopedSaveState s(g);
@@ -1125,12 +1125,94 @@ bool Screen::handle(const io::ControlEvent& e, double nowMs)
     return true;
 }
 
+// MIDI in for the UI (the player already has the notes, bends, the clock and the transport): the transport's events,
+// Song Select (loads that module of the library), and the control channel: notes 36–51 are pads 1–16 (in the pad
+// mode the panel is in), program change n jumps to order n + 1 (quantized as the BAR keys say), and the controllers
+// of midiControl().
 void Screen::midiIn(const MidiMessageIn& m, double nowMs)
 {
     status_->midiInAt = nowMs;
-    const int type = m.bytes[0] & 0xF0;
-    if (type == 0x90 && m.bytes[2] > 0)
-        event("MIDI IN NOTE " + noteName(m.bytes[1]) + " " + juce::String(m.bytes[2]));
+    const int status = m.bytes[0], type = status & 0xF0, channel = status & 0x0F;
+    if (status >= 0xF0)
+    {
+        if (! player_.midiSync.load())
+            return;
+        if (status == 0xFA)
+            event("MIDI START: FOLLOWING THE CLOCK");
+        else if (status == 0xFB)
+            event("MIDI CONTINUE: FOLLOWING THE CLOCK");
+        else if (status == 0xFC)
+            event("MIDI STOP");
+        else if (status == 0xF3 && m.bytes[1] < library_.entries().size())
+            loadEntry(m.bytes[1], player_.playing());
+        return;
+    }
+    const bool control = channel == player_.midiControlChannel.load() - 1;
+    const bool on = type == 0x90 && m.bytes[2] > 0, off = type == 0x80 || (type == 0x90 && m.bytes[2] == 0);
+    if (control && (on || off))
+    {
+        if (const int pad = m.bytes[1] - 36; pad >= 0 && pad < 16)
+        {
+            io::ControlEvent e {on ? io::ControlEvent::Kind::Press : io::ControlEvent::Kind::Release, io::pad(pad + 1),
+                                static_cast<std::int16_t>(m.bytes[2]), static_cast<std::uint8_t>(io::kSourceMidi + m.port), nowMs};
+            if (on || (padsHeld_ & (1ull << pad)))
+                handle(e, nowMs);
+        }
+        return;
+    }
+    if (control && type == 0xB0)
+        midiControl(m.bytes[1], m.bytes[2], nowMs);
+    else if (control && type == 0xC0)
+    {
+        player_.jump(m.bytes[1], static_cast<Quantize>(player_.quantize.load()));
+        event("MIDI: ORDER " + juce::String(m.bytes[1] + 1));
+    }
+    else if (on)
+        event("MIDI IN CH " + juce::String(channel + 1) + " " + noteName(m.bytes[1]) + " " + juce::String(m.bytes[2]));
+}
+
+// The control channel's controllers: 7 volume; 70–75 the knobs TEMPO, PITCH, STEREO, INTERP, GAIN, VIEW (64 = the
+// middle where it has one); 76 DRIVE; 80 ACTIVE, 81 pattern loop, 82 REC (≥ 64 = on); 85 the pad mode (0 FILTER,
+// 1 MUTE, 2 LOOP, 3 PLAY, 4 KIT, 5 OUTS); 102–117 mute channel 1–16 (≥ 64 = muted).
+void Screen::midiControl(int cc, int v, double nowMs)
+{
+    const float x = static_cast<float>(v) / 127.0f;
+    const auto knob = [&](int n) { knobs_->touchedAt[static_cast<std::size_t>(n)] = nowMs; };
+    switch (cc)
+    {
+    case 7: player_.midiVolume = x; break;
+    case 70: player_.tempoFactor = v < 64 ? 0.5f + 0.5f * static_cast<float>(v) / 64.0f : 1.0f + static_cast<float>(v - 64) / 63.0f; knob(0); break;
+    case 71: player_.pitchSemitones = std::clamp(std::round(static_cast<float>(v - 64) / 64.0f * 12.0f), -12.0f, 12.0f); knob(1); break;
+    case 72: player_.stereoSeparation = static_cast<int>(std::lround(x * 200.0f)); knob(2); break;
+    case 73:
+    {
+        static constexpr int steps[] = {1, 2, 4, 8};
+        player_.interpolation = steps[std::clamp(v / 32, 0, 3)];
+        knob(3);
+        break;
+    }
+    case 74: player_.gainDb = v < 64 ? -24.0f + 24.0f * static_cast<float>(v) / 64.0f : 12.0f * static_cast<float>(v - 64) / 63.0f; knob(4); break;
+    case 75: density_ = static_cast<Density>(std::clamp(v * 5 / 128, 0, 4)); knob(5); break;
+    case 76: player_.drive = v * 1023 / 127; break;
+    case 80:
+        if (player_.stems() && player_.masterFilter.load() != (v >= 64))
+        {
+            player_.masterFilter = v >= 64;
+            event(v >= 64 ? "MIDI: WHOLE MIX THROUGH THE ANALOG FILTER" : "MIDI: ANALOG FILTER PADS ONLY");
+        }
+        break;
+    case 81: player_.patternLoop = v >= 64; break;
+    case 82: player_.midiNotes = v >= 64; break;
+    case 85: setPadMode(static_cast<PadMode>(std::clamp(v, 0, 5)), false); break;
+    default:
+        if (cc >= 102 && cc <= 117)
+        {
+            const std::uint64_t b = bit(cc - 102);
+            mutes_ = v >= 64 ? (mutes_ | b) : (mutes_ & ~b);
+            player_.muteMask = mutes_;
+        }
+        break;
+    }
 }
 
 // ---- per frame ------------------------------------------------------------------------------------------------------
@@ -1236,7 +1318,17 @@ void Screen::frame(double nowMs, float fps)
         std::snprintf(t, sizeof t, "%02d", pos.row);
         context_->set(context_->row, juce::String(t));
         context_->set(context_->speed, juce::String(player_.speed()));
-        std::snprintf(t, sizeof t, "%.1f", static_cast<double>(player_.bpm() * player_.tempoFactor.load()));
+        // Following an external clock: its tempo (caption EXT BPM); else the module's.
+        const bool ext = player_.syncState() != Player::SyncInternal && player_.clockBpm() > 0;
+        if (ext != context_->externalClock)
+        {
+            context_->externalClock = ext;
+            context_->repaint();
+        }
+        if (ext)
+            std::snprintf(t, sizeof t, "%.1f", static_cast<double>(player_.clockBpm()));
+        else
+            std::snprintf(t, sizeof t, "%.1f", static_cast<double>(player_.bpm() * player_.tempoFactor.load()));
         context_->set(context_->bpm, juce::String(t));
     }
     else
@@ -1278,7 +1370,11 @@ void Screen::frame(double nowMs, float fps)
     }
 
     // Knob strip.
-    std::snprintf(t, sizeof t, "%.0f%%", static_cast<double>(player_.tempoFactor.load() * 100.0f));
+    static const char* const syncText[] = {"", "WAIT", "EXT", "NO CLOCK"};
+    if (const int sync = player_.syncState(); sync != Player::SyncInternal)
+        std::snprintf(t, sizeof t, "%s", syncText[std::clamp(sync, 0, 3)]);
+    else
+        std::snprintf(t, sizeof t, "%.0f%%", static_cast<double>(player_.tempoFactor.load() * 100.0f));
     knobs_->set(0, (player_.tempoFactor.load() - 0.5f) / 1.5f, t);
     std::snprintf(t, sizeof t, "%+.0f ST", static_cast<double>(player_.pitchSemitones.load()));
     knobs_->set(1, (player_.pitchSemitones.load() + 12.0f) / 24.0f, t);

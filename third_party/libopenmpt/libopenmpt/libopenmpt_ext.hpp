@@ -436,6 +436,12 @@ class track16_position {
 	//! Leave a channel (and its background voices) out of the mix while everything else about it plays on: unlike a mute, its sample positions, envelopes, effects and voice allocation stay exactly as if it were heard, so another instance of the same module can carry it and both stay in lockstep. A channel index past the pattern channels (as play_note returns) silences only that voice.
 	virtual void set_channel_silent( std::int32_t channel, bool silent ) = 0;
 
+	//! A pitch factor for one voice alone (a play_note voice: MIDI pitch bend, vibrato), on top of the global pitch factor; 1.0 = none, clamped to [0.25, 4]. It takes effect with the next tick; play_note resets it.
+	virtual void set_voice_pitch( std::int32_t channel, double factor ) = 0;
+
+	//! The current row's length in seconds from the current speed and tempo, without the tempo factor and without pattern or fine pattern delays.
+	virtual double get_row_seconds() const = 0;
+
 }; // class track16_position
 
 

@@ -163,8 +163,9 @@ footer p { margin: 0 0 6px; max-width: 90ch; }
       <article style="--c: var(--g-sound)"><h3>Single outputs</h3><p>Any channel to OUT 3–8, mono or as stereo pairs,
         with or without MAIN. Jacks can carry the clean mix, the filter's return or a click instead, and a test tone
         per output finds your cables.</p></article>
-      <article style="--c: var(--g-midi)"><h3>MIDI</h3><p>Clock from the module's real row timing, start/stop and song
-        position, the module's notes on 16 MIDI channels, and MIDI notes in to play instruments.</p></article>
+      <article style="--c: var(--g-midi)"><h3>MIDI</h3><p>Sends clock from the module's real row timing and the module's
+        notes on 16 channels. Follows a master's clock, rows locked to its pulses; MIDI channel n plays module channel
+        n's voice, with bend and vibrato; a control channel works as remote pads and knobs.</p></article>
       <article style="--c: var(--g-nav)"><h3>Display</h3><p>The pattern data falls as &ldquo;digital rain&rdquo; onto a
         playhead, each note flaring in its instrument's colour, with a level per channel in the headers.</p></article>
     </div>
@@ -328,7 +329,7 @@ modules/…       your modules, in any folders</pre>
     act: 'Shows the six encoders\' values, right above them.' });
 
   const ENC = [
-    ['TEMPO', 'Tempo 50…200 % in 1 % steps.', 'TEMPO 100 %', 'Back to 100 %.'],
+    ['TEMPO', 'Tempo 50…200 % in 1 % steps. While Track16 follows an external MIDI clock, the clock sets the tempo (the knob shows EXT).', 'TEMPO 100 %', 'Back to 100 %.'],
     ['PITCH', 'Pitch −12…+12 semitones.', 'PITCH 0', 'Back to 0.'],
     ['STEREO', 'Stereo separation 0…200 % (100 % = as the module).', '', ''],
     ['INTERP', 'Interpolation: none, linear, cubic, 8-tap sinc.', '', ''],
@@ -350,8 +351,8 @@ modules/…       your modules, in any folders</pre>
   const T = [
     ['shiftk', 'SHIFT', 'transport', 1083, 44, 'HOLD: SHIFT', 'HOLD: SHIFT', 'Hold for the SHIFT functions of the other controls.', '', ''],
     ['rec', 'REC', 'midi', 1260, 46, 'MIDI NOTES', 'MIDI NOTES', 'MIDI notes out on/off: module channels 1–16 on MIDI channels 1–16. Off ends the notes that are on.', '', 'Lit red while MIDI notes go out.'],
-    ['stop', 'STOP', 'transport', 1387, 46, 'STOP · REWIND', 'RESET ALL', 'Stop and rewind to the start (MIDI Stop).', 'Also clears mutes, solos and the whole-mix filter.', ''],
-    ['play', 'PLAY', 'transport', 1515, 46, 'PLAY / PAUSE', 'PLAY / PAUSE', 'Play or pause. MIDI Start / Continue / Stop follow.', '', 'Lit green while playing.'],
+    ['stop', 'STOP', 'transport', 1387, 46, 'STOP · REWIND', 'RESET ALL', 'Stop and rewind to the start (MIDI Stop). Ends following an external clock.', 'Also clears mutes, solos and the whole-mix filter.', ''],
+    ['play', 'PLAY', 'transport', 1515, 46, 'PLAY / PAUSE', 'PLAY / PAUSE', 'Play or pause; MIDI Start / Continue / Stop go out. While a MIDI clock comes in, PLAY joins it on its next beat and follows it.', '', 'Lit green while playing.'],
     ['scene', 'SCENE', 'transport', 1691, 46, '◀ MODULE', 'OCTAVE −', 'Previous module on the stick.', 'PLAY pads one octave down.', ''],
     ['pattern', 'PATTERN', 'transport', 1862, 46, 'MODULE ▶', 'OCTAVE +', 'Next module on the stick.', 'PLAY pads one octave up. (The printed LENGTH is the stock firmware\'s SHIFT function.)', ''],
   ];
