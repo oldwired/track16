@@ -34,7 +34,7 @@ BACK switches between them (HOME: the library).
 
 ## Controls
 
-An interactive map of the panel with every control: [docs/panel.html](docs/panel.html).
+An interactive map of the panel with every control: [oldwired.github.io/track16](https://oldwired.github.io/track16) (the page is `docs/index.html`).
 
 | Control | Action |
 |---|---|
