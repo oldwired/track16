@@ -72,7 +72,10 @@ public:
 struct PortInfo { AudioPort port; std::int8_t left, right; }; // physical interleaved channels, -1 = absent
 struct AudioConfig { unsigned sampleRate = 44100, periodFrames = 256, periods = 3; int rtPriority = 70; };
 struct AudioStats { std::uint64_t periods = 0, xruns = 0; unsigned sampleRate = 0, periodFrames = 0; bool realtime = false;
-                    std::uint64_t loopDrops = 0; }; // loopDrops: filter-loop periods sent or returned short (the loop's latency may have moved)
+                    std::uint64_t loopDrops = 0;     // filter-loop periods sent or returned short (the loop's latency may have moved)
+                    std::uint64_t loopFrames = 0;    // frames the filter return has brought
+                    bool loopLive = false;           // the return brings frames (else AudioIO::in[2]/[3] are null)
+                    float loopSendPeak = 0, loopReturnPeak = 0; }; // since the last stats() call, as the DAC / ADC see them
 
 class AudioDevice
 {

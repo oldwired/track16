@@ -23,6 +23,9 @@ Marked "Track16" in the source; reapply them after an update.
   only open to CSoundFile).
 - `soundlib/Sndmix.cpp` (`ProcessRow`): with endless repetition (repeat count −1) the visited-rows check is skipped.
   It only reset the visitor there, but that reset allocates, and the stutter loop revisits rows many times a second.
+- `soundlib/Tables.cpp` (`CResampler::InitializeTablesFromScratch`): the windowed-FIR table is rebuilt only when its
+  cutoff or window type changes, not on every interpolation-mode change (the INTERP knob stalled the audio thread
+  for about 130 ms on the unit).
 
 Built by [`cmake/libopenmpt.cmake`](../../cmake/libopenmpt.cmake), which follows the source lists of libopenmpt's
 Makefile.

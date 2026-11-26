@@ -10,6 +10,7 @@
 
 #include <algorithm>
 #include <cerrno>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -255,9 +256,12 @@ bool AlsaOutput::openLoop(std::string& info)
         return false;
     }
     // Not linked to the main PCM (a first unit run with a linked loop stopped right after the audio started): a
-    // linked capture's overrun stops the whole group. The send starts at its threshold, the return is started by its
-    // first read (start threshold 1) and recovers on its own.
+    // linked capture's overrun stops the whole group. The send starts at its threshold; the return starts now and is
+    // read one period behind (readLoop). Its clocks come from hw:ak4452audio,0 (the PHONES PCM, started with the main
+    // stream): until they run, the return brings nothing and is reported absent.
+    // (Ported from freesp16's AlsaOutput, which found this on the unit.)
     snd_pcm_prepare(in);
+    snd_pcm_start(in);
     loopOut_ = out;
     loopIn_ = in;
     const auto n = static_cast<std::size_t>(period_) * 2;
@@ -289,12 +293,35 @@ void AlsaOutput::readLoop() noexcept
     if (pcm == nullptr)
         return;
     void* buf = loopInS24_ ? static_cast<void*>(loopIn32_.data()) : static_cast<void*>(loopIn16_.data());
-    auto n = snd_pcm_readi(pcm, buf, period_);
-    if (n < 0)
+    const auto p = static_cast<snd_pcm_sframes_t>(period_);
+    auto avail = snd_pcm_avail_update(pcm);
+    if (avail < 0) // an overrun: restart (the app measures the loop again)
     {
-        if (n != -EAGAIN) // an overrun: the return restarts at its next read (the ping measures the loop again)
-            snd_pcm_recover(pcm, static_cast<int>(n), 1);
-        n = 0;
+        snd_pcm_recover(pcm, static_cast<int>(avail), 1);
+        snd_pcm_start(pcm);
+        avail = 0;
+    }
+    // One period behind, never more than two: the read below then always finds a whole period (the capture and the
+    // main stream run off one clock family, but their period boundaries are not aligned). A short read would leave a
+    // zero-filled gap every period: a buzz at the period rate on any hiss or offset the return carries.
+    if (avail > 3 * p)
+    {
+        snd_pcm_forward(pcm, static_cast<snd_pcm_uframes_t>(avail - 2 * p));
+        avail = 2 * p;
+    }
+    snd_pcm_sframes_t n = 0;
+    if (avail >= p)
+    {
+        n = snd_pcm_readi(pcm, buf, period_);
+        if (n < 0)
+        {
+            if (n != -EAGAIN)
+            {
+                snd_pcm_recover(pcm, static_cast<int>(n), 1);
+                snd_pcm_start(pcm);
+            }
+            n = 0;
+        }
     }
     const auto got = static_cast<unsigned>(n);
     if (got < period_)
@@ -317,10 +344,30 @@ void AlsaOutput::readLoop() noexcept
     }
     for (unsigned i = got; i < period_; ++i)
         l[i] = r[i] = 0.0f;
-    // Keep the loop's latency bounded: a capture that ran ahead (a late start, a stall) is skipped to one period.
-    const auto avail = snd_pcm_avail_update(pcm);
-    if (avail > static_cast<snd_pcm_sframes_t>(2 * period_))
-        snd_pcm_forward(pcm, static_cast<snd_pcm_uframes_t>(avail) - period_);
+    float peak = 0.0f;
+    for (unsigned i = 0; i < got; ++i)
+        peak = std::max(peak, std::max(std::fabs(l[i]), std::fabs(r[i])));
+    if (peak > loopReturnPeak_.load(std::memory_order_relaxed))
+        loopReturnPeak_.store(peak, std::memory_order_relaxed);
+    loopFrames_.fetch_add(got, std::memory_order_relaxed);
+    // A dead return (no clock, a failed codec) is reported absent, so the app plays without the loop instead of
+    // playing silence; it comes back with the first frames.
+    if (got > 0)
+    {
+        loopStarved_ = 0;
+        if (! returnLive_)
+        {
+            returnLive_ = true;
+            in_[2] = l;
+            in_[3] = r;
+        }
+    }
+    else if (returnLive_ && ++loopStarved_ >= loopDeadPeriods_)
+    {
+        returnLive_ = false;
+        in_[2] = in_[3] = nullptr;
+    }
+    loopLive_.store(returnLive_, std::memory_order_relaxed);
 }
 
 void AlsaOutput::writeLoop() noexcept
@@ -331,13 +378,20 @@ void AlsaOutput::writeLoop() noexcept
     const float* r = out_[2 * fs + 1];
     if (pcm == nullptr || l == nullptr)
         return;
+    const float g = device_.loopGain;
+    float peak = 0.0f;
+    for (unsigned i = 0; i < period_; ++i)
+        peak = std::max(peak, std::max(std::fabs(l[i]), std::fabs(r[i])));
+    peak *= g; // as the send DAC sees it
+    if (peak > loopSendPeak_.load(std::memory_order_relaxed))
+        loopSendPeak_.store(peak, std::memory_order_relaxed);
     const void* data = nullptr;
     if (loopOutS24_)
     {
         for (unsigned i = 0; i < period_; ++i)
         {
-            loopOut32_[2 * i] = toS24(l[i]);
-            loopOut32_[2 * i + 1] = toS24(r[i]);
+            loopOut32_[2 * i] = toS24(l[i] * g);
+            loopOut32_[2 * i + 1] = toS24(r[i] * g);
         }
         data = loopOut32_.data();
     }
@@ -345,8 +399,8 @@ void AlsaOutput::writeLoop() noexcept
     {
         for (unsigned i = 0; i < period_; ++i)
         {
-            loopOut16_[2 * i] = toS16(l[i]);
-            loopOut16_[2 * i + 1] = toS16(r[i]);
+            loopOut16_[2 * i] = toS16(l[i] * g);
+            loopOut16_[2 * i + 1] = toS16(r[i] * g);
         }
         data = loopOut16_.data();
     }
@@ -455,6 +509,10 @@ bool AlsaOutput::start(const AudioConfig& config, platform::AudioProcessor& proc
         {
             in_[2] = loopReturn_.data();
             in_[3] = loopReturn_.data() + period_;
+            returnLive_ = true; // until it stays silent for loopDeadPeriods_
+            loopStarved_ = 0;
+            loopDeadPeriods_ = std::max(1u, (rate_ / 2) / std::max(1u, period_));
+            loopFrames_ = 0;
         }
         else
             loopInfo = "unavailable: " + loopInfo;
@@ -527,8 +585,16 @@ void AlsaOutput::stop()
 
 AudioStats AlsaOutput::stats() const noexcept
 {
-    return {periodsDone_.load(std::memory_order_relaxed), xruns_.load(std::memory_order_relaxed), rate_, period_,
-            realtime_.load(std::memory_order_relaxed), loopDrops_.load(std::memory_order_relaxed)};
+    AudioStats s {periodsDone_.load(std::memory_order_relaxed), xruns_.load(std::memory_order_relaxed), rate_, period_,
+                  realtime_.load(std::memory_order_relaxed), loopDrops_.load(std::memory_order_relaxed)};
+    if (loopIn_ != nullptr)
+    {
+        s.loopFrames = loopFrames_.load(std::memory_order_relaxed);
+        s.loopLive = loopLive_.load(std::memory_order_relaxed);
+        s.loopSendPeak = loopSendPeak_.exchange(0.0f, std::memory_order_relaxed);
+        s.loopReturnPeak = loopReturnPeak_.exchange(0.0f, std::memory_order_relaxed);
+    }
+    return s;
 }
 
 void AlsaOutput::convert() noexcept

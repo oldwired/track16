@@ -61,6 +61,7 @@ public:
 
     // ---- before the audio starts ----
     void setMidi(MidiScheduler* m) noexcept { midi_.store(m, std::memory_order_release); }
+    void setReturnGain(float g) noexcept { returnGain_ = g; } // 1 / filter_send_gain: the return at the send's level
     void setFixedLatency(int frames) noexcept // the filter loop's latency from the settings (no measurement)
     {
         latency_.store(std::clamp(frames, 1, kMaxDelay - 1));
@@ -179,7 +180,7 @@ private:
     void flushPulses(std::uint64_t frame) noexcept;
     void clockChunk(std::uint64_t from, std::uint64_t to) noexcept;
     // the loop latency measurement
-    void measure(const platform::AudioIO&, float* sendL, float* sendR, int offset, int n) noexcept;
+    void measure(const platform::AudioIO&, const float* rl, const float* rr, float* sendL, float* sendR, int n) noexcept;
     void finishMeasure(int frames) noexcept;
 
     MpscQueue<Event, 256> events_;
@@ -231,6 +232,8 @@ private:
     std::array<RouteChange, 8> routeQueue_ {};
     int routeHead_ = 0, routeCount_ = 0;
     std::vector<float> delayL_, delayR_;
+    static constexpr float kDcPole = 0.999f;          // the return's DC blocker (about 7 Hz)
+    float dcInL_ = 0, dcInR_ = 0, dcOutL_ = 0, dcOutR_ = 0, returnGain_ = 2.0f;
     int delayWrite_ = 0, delayNow_ = 0, delayPrev_ = 0, fadeDelay_ = 0;
     // MIDI clock and notes
     int pulsesLeft_ = 0, pulsesPerRow_ = 6;

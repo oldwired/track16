@@ -327,6 +327,16 @@ void testModule(const LibraryEntry& e)
     CHECK(rig.player.measurements() == measured + 1 && rig.player.latencyFrames() == kLoopDelay, "re-measured %d times, latency %d",
           rig.player.measurements() - measured, rig.player.latencyFrames());
 
+    // Turning INTERP costs no more than a fraction of a period (libopenmpt used to rebuild its FIR table each time).
+    rig.player.takeLoadMax();
+    for (int taps : {1, 2, 4, 8, 1, 4})
+    {
+        rig.player.interpolation = taps;
+        rig.run(0.01);
+    }
+    const float interpLoad = rig.player.takeLoadMax();
+    CHECK(interpLoad < 0.5f, "INTERP changes took %.0f %% of a period", static_cast<double>(interpLoad * 100));
+
     // MIDI timestamps never go backwards by more than the latency window.
     bool ordered = true;
     for (std::size_t i = 1; i < rig.midi.messages.size(); ++i)

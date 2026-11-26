@@ -810,10 +810,8 @@ void Player::applySettings() noexcept
 
 // The loop latency: 4096 frames of silence (the noise floor), one short click into the send, then the return's onset
 // within 8192 frames: the first sample above 30 % of the peak (the peak itself moves with the LP cutoff).
-void Player::measure(const platform::AudioIO& io, float* sendL, float* sendR, int offset, int n) noexcept
+void Player::measure(const platform::AudioIO& io, const float* rl, const float* rr, float* sendL, float* sendR, int n) noexcept
 {
-    const float* rl = io.in[2] + offset;
-    const float* rr = io.in[3] + offset;
     for (int i = 0; i < n; ++i)
     {
         if (measurePhase_ >= 2) // finished within this chunk
@@ -852,7 +850,9 @@ void Player::finishMeasure(int frames) noexcept
             onset = i;
             break;
         }
-    const bool ok = peak > 4.0f * measureNoise_ && peak > 1e-3f && onset > 0;
+    // An onset beyond any plausible loop (the send's buffer plus the return read a period or two behind) is an xrun's
+    // artefact, not the loop.
+    const bool ok = peak > 4.0f * measureNoise_ && peak > 1e-3f && onset > 0 && onset < 6 * frames + 1024;
     if (ok)
     {
         latency_.store(std::min(onset, kMaxDelay - 1), std::memory_order_relaxed);
@@ -997,12 +997,24 @@ void Player::process(const platform::AudioIO& io) noexcept
         float* mr = io.out[1] != nullptr ? io.out[1] + done : nullptr;
         float* sl = sendL != nullptr ? sendL + done : nullptr;
         float* sr2 = sendR != nullptr ? sendR + done : nullptr;
-        const float* rl = loop ? io.in[2] + done : nullptr;
-        const float* rr = loop ? io.in[3] + done : nullptr;
+        // The return without its DC offset (a step in an offset is a click on every route change) and at the send's
+        // level again (the hardware sends at filter_send_gain).
+        float rl[kChunk] = {}, rr[kChunk] = {};
+        if (loop)
+            for (int i = 0; i < n; ++i)
+            {
+                const float xl = io.in[2][done + i], xr = io.in[3][done + i];
+                dcOutL_ = xl - dcInL_ + kDcPole * dcOutL_;
+                dcOutR_ = xr - dcInR_ + kDcPole * dcOutR_;
+                dcInL_ = xl;
+                dcInR_ = xr;
+                rl[i] = dcOutL_ * returnGain_;
+                rr[i] = dcOutR_ * returnGain_;
+            }
 
         const bool measured = loop && measurePhase_ >= 0 && measurePhase_ < 2; // measure() writes the send
         if (measured)
-            measure(io, sl, sr2, done, n);
+            measure(io, rl, rr, sl, sr2, n);
 
         for (int i = 0; i < n; ++i)
         {

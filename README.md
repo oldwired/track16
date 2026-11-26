@@ -66,7 +66,10 @@ them with the other. HP cutoff and drive are read by the panel.
 Track16 measures the filter loop's latency at start (ANALOG FILTER ACTIVE lights up for a moment; nothing plays until
 it is done) and delays the unfiltered channels by it, so both paths stay aligned. The result is shown and logged
 (`FILTER LOOP latency …`); "no return" means the click did not come back (LP cutoff closed?) and a guess is used.
-After the loop drops periods it is measured again as soon as no channel goes through the filter.
+After the loop drops periods it is measured again as soon as no channel goes through the filter. While the return
+brings no audio at all (no clock, a codec fault) the loop counts as absent and everything plays unfiltered, so a
+dead loop never silences the output. The STAT lines in `bootmenu.log` show the loop's state (`loop_live`,
+`loop_frames`, `loop_drops`) and its levels (`send_peak`, `return_peak`).
 
 Loops, the pattern loop and jumps take effect at a row boundary, so the song never stutters off the grid.
 
@@ -96,6 +99,7 @@ midi_notes=0
 midi_offset_ms=0
 filter_loop=1        the analog filter loop (0: off)
 filter_latency=0     fixed loop latency in frames (0: measure at start)
+filter_send_gain=0.5 the filter send's level (−6 dB: headroom for the drive); the return is raised by 1/gain
 stat=10              seconds between STAT lines in bootmenu.log
 ```
 

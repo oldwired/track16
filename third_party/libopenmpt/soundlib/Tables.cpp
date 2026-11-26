@@ -834,8 +834,11 @@ void CResampler::InitializeTablesFromScratch(bool force)
 #endif  // MODPLUG_TRACKER
 	}
 
-	if((m_OldSettings == m_Settings) && !force)
+	// Track16: the windowed-FIR table depends on the cutoff and the window type only. Comparing the whole settings
+	// rebuilt it (tens of ms on the SP-16) on the audio thread whenever the interpolation mode changed.
+	if(!force && m_OldSettings.gdWFIRCutoff == m_Settings.gdWFIRCutoff && m_OldSettings.gbWFIRType == m_Settings.gbWFIRType)
 	{
+		m_OldSettings = m_Settings;
 		return;
 	}
 

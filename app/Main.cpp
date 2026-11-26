@@ -15,6 +15,7 @@
 //   rows_per_beat=<n>           for the MIDI clock and the beat quantize (default 4)
 //   midi_out=all|din|usb|none   midi_clock=0|1  midi_notes=0|1  midi_offset_ms=<ms>
 //   filter_latency=<frames>     the analog filter loop's latency (default: measured at start)
+//   filter_send_gain=<0…1>      the filter send's fixed gain (default 0.5, −6 dB; the return is brought back by 1/gain)
 // and passes the rest to the platform (audio_period, audio_periods, filter_loop, …: hw/imx6/Imx6Platform.cpp).
 #include "app/GlDisplay.h"
 #include "app/Log.h"
@@ -33,6 +34,7 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <cmath>
 #include <atomic>
 #include <cctype>
 #include <cstdlib>
@@ -58,7 +60,7 @@ platform::Settings loadSettings(const std::string& file)
     platform::Settings s {{"audio", "1"}, {"midi", "1"}, {"stat", "10"}, {"filter_loop", "1"}, {"audio_period", "128"},
                           {"audio_periods", "3"}, {"stereo", "100"}, {"interp", "4"}, {"rows_per_beat", "4"},
                           {"midi_out", "all"}, {"midi_clock", "1"}, {"midi_notes", "0"}, {"midi_offset_ms", "0"},
-                          {"autoplay", "0"}, {"modules", ""}, {"filter_latency", "0"}};
+                          {"autoplay", "0"}, {"modules", ""}, {"filter_latency", "0"}, {"filter_send_gain", "0.5"}};
     std::ifstream in(file);
     for (std::string line; std::getline(in, line);)
         if (const auto eq = line.find('='); eq != std::string::npos && trim(line).rfind('#', 0) != 0)
@@ -141,6 +143,8 @@ int run()
     // Before the audio starts (the audio thread reads them from its first period).
     Midi midi(player, settings["midi_out"]);
     player.setMidi(&midi);
+    if (const double g = std::strtod(settings["filter_send_gain"].c_str(), nullptr); g > 0.01) // the hardware's send gain
+        player.setReturnGain(static_cast<float>(1.0 / std::min(g, 1.0)));
     if (const int latency = number(settings, "filter_latency", 0); latency > 0)
         player.setFixedLatency(latency);
 
@@ -214,6 +218,7 @@ int run()
     const double statMs = 1000.0 * std::atof(settings["stat"].c_str());
     double lastStat = start, lastMidiScan = start, fpsFrom = start, lastRemeasure = start;
     std::uint64_t lastLoopDrops = ~0ull;
+    float sendPeak = 0, returnPeak = 0; // the filter loop's peaks between STAT lines
     long frames = 0, fpsFrames = 0;
     float fps = 0;
     while (! stopSignal && ! platform::quitRequested())
@@ -250,9 +255,12 @@ int run()
         // filter board's select line), and again after the loop dropped periods (at most every 10 s, when no route is on).
         if (frames == 3 || (! lamps && frames == 0))
             player.armMeasure();
-        if (audio != nullptr && player.measurements() > 0)
+        const auto audioNow = audio != nullptr ? audio->stats() : platform::AudioStats {};
+        sendPeak = std::max(sendPeak, audioNow.loopSendPeak); // stats() hands each peak out once
+        returnPeak = std::max(returnPeak, audioNow.loopReturnPeak);
+        if (audio != nullptr && player.measurements() > 0 && audioNow.loopLive)
         {
-            const auto drops = audio->stats().loopDrops;
+            const auto drops = audioNow.loopDrops;
             if (drops != lastLoopDrops && now - lastRemeasure >= 10000.0)
             {
                 if (lastLoopDrops != ~0ull)
@@ -285,13 +293,17 @@ int run()
         }
         if (statMs > 0 && now - lastStat >= statMs)
         {
-            const auto st = audio != nullptr ? audio->stats() : platform::AudioStats {};
+            const auto& st = audioNow;
             const auto pos = player.position();
-            logLine("STAT fps=%.0f dsp=%.1f%% dsp_max=%.1f%% xruns=%llu playing=%d order=%d row=%d route=%d loop_latency=%d%s midi_in=%d midi_out=%d midi_sent=%d",
+            const auto dbfs = [](float v) { return v > 1e-6f ? 20.0 * std::log10(static_cast<double>(v)) : -120.0; };
+            logLine("STAT fps=%.0f dsp=%.1f%% dsp_max=%.1f%% xruns=%llu playing=%d order=%d row=%d route=%d loop_latency=%d%s"
+                    " loop_live=%d loop_frames=%llu loop_drops=%llu send_peak=%.1fdB return_peak=%.1fdB midi_in=%d midi_out=%d midi_sent=%d",
                     static_cast<double>(fps), static_cast<double>(player.loadAverage() * 100), static_cast<double>(player.takeLoadMax() * 100),
                     static_cast<unsigned long long>(st.xruns), player.playing() ? 1 : 0, pos.order, pos.row, static_cast<int>(player.route()),
                     player.latencyFrames(), player.stems() ? (player.latencyMeasured() ? " (measured)" : " (fallback)") : " (no loop)",
-                    midi.inputCount(), midi.outputCount(), midi.sentCount());
+                    st.loopLive ? 1 : 0, static_cast<unsigned long long>(st.loopFrames), static_cast<unsigned long long>(st.loopDrops),
+                    dbfs(sendPeak), dbfs(returnPeak), midi.inputCount(), midi.outputCount(), midi.sentCount());
+            sendPeak = returnPeak = 0;
             lastStat = now;
         }
     }
