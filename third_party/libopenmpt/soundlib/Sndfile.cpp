@@ -910,13 +910,16 @@ double CSoundFile::GetCurrentBPM() const
 }
 
 
-void CSoundFile::ResetPlayPos()
+void CSoundFile::ResetPlayPos(bool resetVisitedRows)
 {
 	const auto muteFlag = GetChannelMuteFlag();
 	for(CHANNELINDEX i = 0; i < m_PlayState.Chn.size(); i++)
 		m_PlayState.Chn[i].Reset(ModChannel::resetSetPosFull, *this, i, muteFlag);
 
-	m_visitedRows.Initialize(true);
+	// Track16 (not upstream): the table of visited rows is rebuilt for the whole song (allocating); with endless
+	// repetition it is not consulted (Sndmix.cpp), so Track16's rewind on the audio thread skips it.
+	if(resetVisitedRows)
+		m_visitedRows.Initialize(true);
 	m_PlayState.m_flags.reset(SONG_FADINGSONG | SONG_ENDREACHED);
 
 	m_PlayState.m_nGlobalVolume = m_nDefaultGlobalVolume;

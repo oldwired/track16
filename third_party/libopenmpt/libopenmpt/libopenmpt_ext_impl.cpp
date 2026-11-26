@@ -391,7 +391,7 @@ namespace openmpt {
 	}
 
 	void module_ext_impl::rewind() {
-		m_sndFile->ResetPlayPos();
+		m_sndFile->ResetPlayPos( false ); // no visited-rows table: allocation-free, and the player loops endlessly
 		m_currentPositionSeconds = 0.0;
 	}
 

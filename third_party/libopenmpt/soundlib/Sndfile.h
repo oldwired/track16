@@ -755,7 +755,7 @@ public:
 	void DontLoopPattern(PATTERNINDEX nPat, ROWINDEX nRow = 0);
 	CHANNELINDEX GetMixStat() const { return m_nMixStat; }
 	void ResetMixStat() { m_nMixStat = 0; }
-	void ResetPlayPos();
+	void ResetPlayPos(bool resetVisitedRows = true); // Track16: false skips the visited-rows table (see Sndfile.cpp)
 	void SetCurrentOrder(ORDERINDEX nOrder);
 	// Track16 addition (not upstream): play (order, row) after the current row (now: at once), without resetting
 	// the channels or simulating the song up to there. The caller checks the position.

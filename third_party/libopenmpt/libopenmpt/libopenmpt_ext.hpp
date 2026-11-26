@@ -430,7 +430,7 @@ class track16_position {
 	//! Start (order, row) with the next rendered sample, as set_next_position but without finishing the current row.
 	virtual bool jump_to_position( std::int32_t order, std::int32_t row ) = 0;
 
-	//! Back to order 0, row 0 with the module's initial speed, tempo and global volume; all voices reset.
+	//! Back to order 0, row 0 with the module's initial speed, tempo and global volume; all voices reset. For endless repetition (repeat count -1) only: the visited-rows table is not rebuilt.
 	virtual void rewind() = 0;
 
 	//! Leave a channel (and its background voices) out of the mix while everything else about it plays on: unlike a mute, its sample positions, envelopes, effects and voice allocation stay exactly as if it were heard, so another instance of the same module can carry it and both stay in lockstep. A channel index past the pattern channels (as play_note returns) silences only that voice.

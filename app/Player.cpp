@@ -863,6 +863,8 @@ void Player::applyMasks() noexcept
                 if (stemDest_[static_cast<std::size_t>(k)] == outs::kMain)
                 {
                     stemDest_[static_cast<std::size_t>(k)] = d;
+                    // Its delay lines were not written while it was free: start them silent.
+                    std::fill_n(lanes_.begin() + static_cast<std::ptrdiff_t>(kLaneOut0 + 2 * k) * kMaxDelay, 2 * kMaxDelay, 0.0f);
                     served |= 1u << d;
                     break;
                 }
@@ -1079,12 +1081,15 @@ void Player::process(const platform::AudioIO& io) noexcept
         for (int c = 0; c < kMaxChannels; ++c)
             chDest_[static_cast<std::size_t>(c)] = outDest_[static_cast<std::size_t>(c)].load(std::memory_order_relaxed);
         alsoMain_ = outAlsoMain_.load(std::memory_order_relaxed);
+        const bool clickWas = clickUsed_;
         clickUsed_ = false;
         for (int j = 0; j < outs::kJacks; ++j)
         {
             src_[static_cast<std::size_t>(j)] = static_cast<outs::Source>(jackSource_[static_cast<std::size_t>(j)].load(std::memory_order_relaxed));
             clickUsed_ = clickUsed_ || src_[static_cast<std::size_t>(j)] == outs::Source::Click;
         }
+        if (clickUsed_ && ! clickWas && ! lanes_.empty()) // its delay line was not written meanwhile
+            std::fill_n(lanes_.begin() + static_cast<std::ptrdiff_t>(kLaneClick) * kMaxDelay, kMaxDelay, 0.0f);
         masksDirty_ = true;
     }
     if (! holdEvents)
@@ -1182,6 +1187,17 @@ void Player::process(const platform::AudioIO& io) noexcept
     }
     const float jackGain = std::pow(10.0f, gainDb.load(std::memory_order_relaxed) / 20.0f);
     const int nOut = song_ != nullptr ? static_cast<int>(song_->outs.size()) : 0;
+    // Work for the jacks only while something is on them (an out stem in use, a utility signal); else silence.
+    bool jackWork = false;
+    for (int k = 0; k < nOut; ++k)
+        jackWork = jackWork || stemDest_[static_cast<std::size_t>(k)] != outs::kMain;
+    for (int j = 0; j < outs::kJacks; ++j)
+        jackWork = jackWork || src_[static_cast<std::size_t>(j)] != outs::Source::Channels;
+    jackWork = jackWork && anyJack;
+    if (! jackWork)
+        for (int j = 0; j < outs::kJacks; ++j)
+            if (jackOut[j] != nullptr)
+                std::fill(jackOut[j], jackOut[j] + io.frames, 0.0f);
     std::array<float, outs::kJacks> jackPeak {};
     // The test tone: a request (output index, or kToneStop) starts it, or stops the one playing on that output.
     if (const int want = toneArm_.exchange(kToneNone, std::memory_order_acq_rel); want != kToneNone)
@@ -1269,7 +1285,7 @@ void Player::process(const platform::AudioIO& io) noexcept
             };
             const float ddl = lane(kLaneDryL, dl[i]), ddr = lane(kLaneDryR, dr[i]);
             const float dwl = lane(kLaneWetL, wl[i]), dwr = lane(kLaneWetR, wr[i]);
-            const float click = lane(kLaneClick, ck[i]);
+            const float click = clickUsed_ ? lane(kLaneClick, ck[i]) : 0.0f;
             float outL = 0, outR = 0;
             float dacPeak = 0; // the driven signal as the DAC that feeds the filter sees it (1 = full scale)
             const float retL = rl[i], retR = rr[i];
@@ -1361,8 +1377,10 @@ void Player::process(const platform::AudioIO& io) noexcept
             // The single outs: the out stems on their jacks (a mono jack gets ½ (L + R): libopenmpt pans linearly, so
             // that is a channel's level at any pan), then the utility signals.
             float jk[outs::kJacks] = {};
-            for (int k = 0; k < nOut; ++k)
+            for (int k = 0; k < nOut && jackWork; ++k)
             {
+                if (stemDest_[static_cast<std::size_t>(k)] == outs::kMain)
+                    continue; // free: its lanes start silent when it is given out
                 const float a = lane(kLaneOut0 + 2 * k, ol[k][i]), b = lane(kLaneOut0 + 2 * k + 1, orr[k][i]);
                 const auto d = stemDest_[static_cast<std::size_t>(k)];
                 if (outs::isPair(d))
@@ -1377,7 +1395,7 @@ void Player::process(const platform::AudioIO& io) noexcept
                 delayWrite_ = (w + 1) % kMaxDelay;
             if (kf > 0)
                 --fadeDelay_;
-            if (anyJack)
+            if (jackWork)
             {
                 for (int j = 0; j < outs::kJacks; ++j)
                 {
