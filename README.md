@@ -6,9 +6,9 @@ with: pad modes for muting, looping, playing the module's instruments and sendin
 analog filter, channels on the single outputs OUT 3–8, MIDI clock and notes on the MIDI outs, and the pattern data as
 "digital rain" on the display.
 
-Status: first implementation (0.1.0). The engine is tested on a build machine (`tests/`); the unit test of the whole
-app is pending. The app is started from the community [boot menu](https://github.com/freesp16/bootmenu); nothing is
-installed on the unit and nothing is written to its internal memory.
+Status: 0.1.0, in testing on the unit. The engine is tested on a build machine (`tests/`); playback, the pad modes,
+the analog filter routes, MIDI and the output test tones have been checked on a unit. The app is started from the community [boot menu](https://github.com/freesp16/bootmenu);
+nothing is installed on the unit and nothing is written to its internal memory.
 
 ## The stick
 
@@ -202,3 +202,7 @@ remote `template` (`git pull template main` merges its fixes). Its documentation
 
 GPL-3.0 (see `LICENSE`). JUCE is used under its free licence, AGPLv3. libopenmpt is BSD-3-Clause. Distributed
 binaries come with their complete source.
+
+An independent community project, not affiliated with or endorsed by Pioneer DJ or AlphaTheta. TORAIZ and SP-16 are
+their trademarks and appear here only to name the hardware this runs on. No firmware is included. Running unofficial
+software on your unit is at your own risk.
