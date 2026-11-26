@@ -118,7 +118,9 @@ svg text { font-family: var(--display); }
   <div class="ref" id="ref"></div>
   <p class="note">The drawing follows freesp16's panel illustration. Lamps: the pads show the active mode (channel
     colours, red = through the filter, slow blink = latched); the step keys show the order page (white = playing,
-    amber blinking = queued jump).</p>
+    amber blinking = queued jump). The rear jacks are not drawn: MAIN OUT and PHONES carry the mix; OUT 3–8 carry
+    what the OUTS pad mode sends them, channels (each jack alone in mono, or 3-4, 5-6, 7-8 as stereo pairs) or the
+    clean mix, the filter's return or a click.</p>
 </div>
 
 <script>
@@ -139,7 +141,7 @@ svg text { font-family: var(--display); }
 
   const state = { mode: 'filter', shift: false, sel: null };
   const MODES = [
-    ['filter', 'FILTER', 'TRACK'], ['mute', 'MUTE', 'MUTE'], ['loop', 'LOOP', 'SLICE'], ['play', 'PLAY', 'SCALE'], ['kit', 'KIT', 'SHIFT + SCALE'],
+    ['filter', 'FILTER', 'TRACK'], ['mute', 'MUTE', 'MUTE'], ['loop', 'LOOP', 'SLICE'], ['play', 'PLAY', 'SCALE'], ['kit', 'KIT', 'SHIFT + SCALE'], ['outs', 'OUTS', 'SHIFT + TRACK'],
   ];
   const LOOPS = [1, 2, 3, 4, 6, 8, 12, 16, 24, 32, 48, 64];
   const NOTES = ['C-', 'C#', 'D-', 'D#', 'E-', 'F-', 'F#', 'G-', 'G#', 'A-', 'A#', 'B-'];
@@ -213,9 +215,9 @@ svg text { font-family: var(--display); }
   add({ id: 'tback', g: 'nav', s: ['r', ...dz(16, 52, 96, 72), 4], name: 'SCREEN: ◀ button', tag: '',
     act: 'Tap: switch between LIBRARY and PLAYER.' });
   ['FILTER', 'MUTE', 'LOOP', 'PLAY'].forEach((m, i) => add({ id: 'tmode' + i, g: 'pads', s: ['r', ...dz(824 + 112 * i, 52, 104, 72), 4],
-    name: 'SCREEN: ' + m + ' button', act: i === 3 ? 'Tap: PLAY pad mode; tap again in PLAY: KIT mode.' : 'Tap: ' + m + ' pad mode.' }));
+    name: 'SCREEN: ' + m + ' button', act: i === 3 ? 'Tap: PLAY pad mode; tap again in PLAY: KIT mode.' : i === 0 ? 'Tap: FILTER pad mode; tap again in FILTER: OUTS mode (and back).' : 'Tap: ' + m + ' pad mode.' }));
   add({ id: 'tbody', g: 'nav', s: ['r', ...dz(0, 137, 1280, 487), 4], name: 'SCREEN: body',
-    act: 'PLAYER: the pattern rain (rows fall onto the playhead and flare in their instrument\'s colour). LIBRARY: tap a module to select it, tap it again to play it.' });
+    act: 'PLAYER: the pattern rain (rows fall onto the playhead and flare in their instrument\'s colour). In the OUTS pad mode: the OUTS page instead, a grid of the pads\' 16 channels against MAIN, OUT 3–8 and +MAIN (tap a cell to route; tap a jack\'s name to change what it carries) with a level meter per jack. LIBRARY: tap a module to select it, tap it again to play it.' });
   add({ id: 'tknobs', g: 'sound', s: ['r', ...dz(0, 624, 1280, 144), 4], name: 'SCREEN: knob strip',
     act: 'Shows the six encoders\' values, right above them.' });
 
@@ -283,9 +285,13 @@ svg text { font-family: var(--display); }
         sh: `SHIFT + pad: select instrument ${n} for the PLAY pads.`, lamp: 'White flash on hit. The C pads are blue.' };
       case 'kit': return { label: 'INSTR ' + n, sub: 'PLAY',
         act: `Play instrument ${n} at its standard pitch.`, sh: '', lamp: 'The instrument\'s colour, flashing on hit.' };
+      case 'outs': return { label: 'CH ' + n, sub: state.shift ? '+MAIN' : 'HOLD + STEP',
+        act: `Hold (with other pads too) and press a STEP key: channel ${n} to MAIN (STEP 1), to one of the jacks OUT 3–8 in mono (STEP 3–8), or to a pair in stereo (STEP 3 + 4, 5 + 6 or 7 + 8 together).`,
+        sh: 'SHIFT + pad: +MAIN on/off, so a channel on a single out plays on MAIN as well.',
+        lamp: 'Faint: on MAIN. Blue (3-4), green (5-6), amber (7-8): lit for a stereo pair, dim for a single jack, blinking with +MAIN. Red blinking: no free instance (out_stems). White while held.' };
     }
   }
-  const PADCOL = { filter: ['#ff9a6a', '#ff5a3c'], mute: ['#c58cff', '#8f6bff'], loop: ['#ffc24a', '#ff9f1c'], play: ['#6ec3ff', '#3d7dff'], kit: ['#7ef0b0', '#2fd6a0'] };
+  const PADCOL = { filter: ['#ff9a6a', '#ff5a3c'], mute: ['#c58cff', '#8f6bff'], loop: ['#ffc24a', '#ff9f1c'], play: ['#6ec3ff', '#3d7dff'], kit: ['#7ef0b0', '#2fd6a0'], outs: ['#9db8ff', '#4c7dff'] };
 
   // ---------- draw ----------
   const defs = el('defs');
@@ -395,6 +401,7 @@ svg text { font-family: var(--display); }
   const tagText = {};
   const putTag = (c, x, y, size = 16, anchor = 'middle') => { tagText[c.id] = text(x, y, '', size, col(c.g), tags, { 'text-anchor': anchor, 'font-weight': 700 }); };
   const byId = Object.fromEntries(C.map(c => [c.id, c]));
+  for (let i = 1; i <= 16; i++) { const c = byId['step' + i]; Object.assign(c, { act0: c.act, sh0: c.sh, lamp0: c.lamp }); }
   putTag(byId.mainout, 162, 76); putTag(byId.drive, 340, 76); putTag(byId.lp, 515, 76); putTag(byId.res, 690, 76); putTag(byId.hp, 865, 76);
   putTag(byId.active, 990, 76);
   putTag(byId.smode, 162, 326, 13); putTag(byId.shold, 162, 526, 13);
@@ -405,7 +412,14 @@ svg text { font-family: var(--display); }
   MK.forEach(([id], i) => putTag(byId[id], PX[i] + 71, 904, 15));
   const stripTag = text(0, 0, '', 16, col('sound'), tags, { transform: 'translate(140 713) rotate(-90)', 'font-weight': 700 });
   stripTag.textContent = 'PITCH · REPEAT · TEMPO · VOL';
-  const modeTagText = { filter: 'FILTER', mute: 'MUTE', loop: 'LOOP', play: 'PLAY', kit: 'KIT' };
+  const modeTagText = { filter: 'FILTER', mute: 'MUTE', loop: 'LOOP', play: 'PLAY', kit: 'KIT', outs: 'OUTS' };
+  const stepOuts = n => n <= 2 ? { label: 'MAIN', sub: n === 1 && state.shift ? 'IDENT' : '',
+      act: 'With pads held: their channels back to MAIN only.', sh: n === 1 ? 'SHIFT + STEP 1: identify the jacks: 1 beep on OUT 3, 2 on OUT 4 … 6 on OUT 8.' : '',
+      lamp: 'While a pad is held: white if its channel plays on MAIN. Otherwise dim white.' }
+    : n <= 8 ? { label: 'OUT ' + n, sub: 'JACK',
+      act: `With pads held: their channels to OUT ${n} in mono; together with STEP ${n % 2 ? n + 1 : n - 1}: to the pair ${n % 2 ? n + '-' + (n + 1) : (n - 1) + '-' + n} in stereo. Without pads: what OUT ${n} carries, CH (the channels sent to it) → CLEAN (the mix before the analog filter and DRIVE) → RETURN (the filter's return) → CLICK (a metronome).`,
+      sh: '', lamp: 'While a pad is held: lit where its channel goes. Otherwise in the jack\'s colour (lit: channels on it, faint: free), dim white CLEAN, dim red RETURN, blinking white CLICK; fast white blinking while it beeps.' }
+    : { label: '—', sub: '', act: 'Not used in the OUTS mode.', sh: '', lamp: 'Off.' };
 
   // ---------- render state ----------
   function render() {
@@ -416,10 +430,10 @@ svg text { font-family: var(--display); }
     }
     MK.forEach(([id, , mode]) => {
       const c = byId[id];
-      const active = state.mode === mode || (mode === 'play' && state.mode === 'kit');
+      const active = state.mode === mode || (mode === 'play' && state.mode === 'kit') || (mode === 'filter' && state.mode === 'outs');
       c.keyInner.setAttribute('fill', active ? '#e6e8eb' : '#0d0e10');
       c.keyText.setAttribute('fill', active ? '#0d0e10' : '#e6e8eb');
-      tagText[id].textContent = mode === 'play' ? (sh ? 'KIT' : 'PLAY') : modeTagText[mode];
+      tagText[id].textContent = mode === 'play' ? (sh ? 'KIT' : 'PLAY') : mode === 'filter' ? (sh ? 'OUTS' : 'FILTER') : modeTagText[mode];
     });
     byId.shiftk.keyInner.setAttribute('fill', sh ? '#9fa3a9' : '#2a2c30');
     byId.shiftk.keyText.setAttribute('fill', sh ? '#111' : '#e6e8eb');
@@ -433,11 +447,20 @@ svg text { font-family: var(--display); }
     }
     for (let n = 1; n <= 16; n++) {
       const c = byId['step' + n];
+      if (state.mode === 'outs') {
+        const o = stepOuts(n);
+        c.padLabel.textContent = o.label; c.padSub.textContent = o.sub;
+        c.padRect.setAttribute('fill', n <= 2 ? '#f4f6f8' : n <= 8 ? ['#9db8ff', '#7ee0a0', '#ffc24a'][Math.floor((n - 3) / 2)] : '#2a2c30');
+        Object.assign(c, { act: o.act, sh: o.sh, lamp: o.lamp });
+        continue;
+      }
+      Object.assign(c, { act: c.act0, sh: c.sh0, lamp: c.lamp0 });
       c.padLabel.textContent = sh ? 'PAGE' : 'ORDER';
       c.padSub.textContent = String(n);
       c.padRect.setAttribute('fill', sh ? '#cfd3d8' : n === 3 ? '#f4f6f8' : n === 6 ? '#ffc24a' : ['#e8d28a', '#a6e08a', '#9aa6f0', '#f0a0c8'][(n - 1) % 4]);
     }
-    tmodeText.forEach((t, i) => t.setAttribute('fill', (state.mode === ['filter', 'mute', 'loop', 'play'][i] || (i === 3 && state.mode === 'kit')) ? '#c58cff' : '#e6e8eb'));
+    tmodeText.forEach((t, i) => t.setAttribute('fill', (state.mode === ['filter', 'mute', 'loop', 'play'][i] || (i === 3 && state.mode === 'kit') || (i === 0 && state.mode === 'outs')) ? '#c58cff' : '#e6e8eb'));
+    tmodeText[0].textContent = state.mode === 'outs' ? 'OUTS' : 'FILTER';
     byId.active.lampEl.setAttribute('fill', state.mode === 'filter' ? '#ff3b3b' : '#6e1d22');
     document.querySelectorAll('#modes button').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.mode === state.mode)));
     document.getElementById('shift').setAttribute('aria-pressed', String(sh));
@@ -475,9 +498,9 @@ svg text { font-family: var(--display); }
   svg.addEventListener('click', e => {
     const g = e.target.closest('.ctl'); if (!g) return;
     const id = g.dataset.id, c = byId[id];
-    if (c.modeKey) { state.mode = c.modeKey === 'play' && state.shift ? 'kit' : c.modeKey; }
+    if (c.modeKey) { state.mode = c.modeKey === 'play' && state.shift ? 'kit' : c.modeKey === 'filter' && state.shift ? 'outs' : c.modeKey; }
     if (id === 'shiftk') state.shift = !state.shift;
-    if (id.startsWith('tmode')) { const i = +id.slice(5); state.mode = ['filter', 'mute', 'loop', i === 3 && state.mode === 'play' ? 'kit' : 'play'][i]; }
+    if (id.startsWith('tmode')) { const i = +id.slice(5); state.mode = [state.mode === 'filter' ? 'outs' : 'filter', 'mute', 'loop', i === 3 && state.mode === 'play' ? 'kit' : 'play'][i]; }
     state.sel = id;
     render();
   });
@@ -511,12 +534,12 @@ svg text { font-family: var(--display); }
     ['unused', ['usbstop']],
   ];
   const MODEKEY_ACT = {
-    ptrack: ['FILTER mode: hold a pad to send that channel through the analog filter. Press again: the next 16 channels.', ''],
+    ptrack: ['FILTER mode: hold a pad to send that channel through the analog filter. Press again: the next 16 channels.', 'OUTS mode: where each channel plays (MAIN, a single out OUT 3–8, a stereo pair); hold pads and press STEP keys. The screen shows the OUTS page.'],
     pmute: ['MUTE mode: pads mute channels. Press again: the next 16 channels.', ''],
     pslice: ['LOOP mode: hold a pad for a stutter loop of 1–64 rows.', ''],
     pscale: ['PLAY mode: the pads play the selected instrument chromatically. Press again: the next 16 instruments.', 'KIT mode: pads 1–16 play instruments 1–16.'],
   };
-  for (const [id, [act, sh]] of Object.entries(MODEKEY_ACT)) Object.assign(byId[id], { act, sh, lamp: 'Lit: the active mode (KIT: SCALE blinks).' });
+  for (const [id, [act, sh]] of Object.entries(MODEKEY_ACT)) Object.assign(byId[id], { act, sh, lamp: 'Lit: the active mode (KIT: SCALE blinks; OUTS: TRACK blinks).' });
   const refEl = document.getElementById('ref');
   function renderRef() {
     refEl.innerHTML = '';
@@ -531,7 +554,7 @@ svg text { font-family: var(--display); }
         const tr = document.createElement('tr');
         tr.dataset.id = id;
         const name = id === 'step1' ? 'STEP 1–16' : id === 'pad1' ? 'PADS 1–16' : c.name;
-        const act = id === 'step1' ? 'Jump to an order of the current order page; BAR 1–3 set when.' :
+        const act = id === 'step1' ? 'Jump to an order of the current order page; BAR 1–3 set when. In the OUTS pad mode: STEP 1 = MAIN, STEP 3–8 = the jacks OUT 3–8 (with pads held: route them; alone: what the jack carries).' :
           id === 'pad1' ? 'Depend on the pad mode: pick one above to see each pad on the drawing.' : c.act;
         const sh = id === 'step1' ? 'Choose the order page (pages of 16 orders).' : id === 'pad1' ? '' : c.sh;
         const td1 = document.createElement('td'); td1.textContent = name;

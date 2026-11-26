@@ -7,6 +7,7 @@
 #include "app/Player.h"
 #include "app/Song.h"
 
+#include <algorithm>
 #include <array>
 #include <chrono>
 #include <cmath>
@@ -64,26 +65,30 @@ struct Rig
 {
     Player player;
     Recorder midi;
-    bool loop;
+    bool loop, jacks;
     std::vector<std::vector<float>> out;
     std::vector<float> in2, in3, ringL, ringR;
     float* outPtr[12] {};
     const float* inPtr[4] {};
     std::uint64_t t = 0, ns = 1000000000ull;
     double energy = 0, sendEnergy = 0, time = 0;
+    std::array<double, 6> jackEnergy {}; // OUT 3–8
+    double diff34 = 0;                   // the largest |MAIN − OUT 3-4| sample difference (compare34)
+    bool compare34 = false;
     long periods = 0, rowsSeen = 0;
     int lastOrder = -1, lastRow = -1;
     bool finite = true;
 
-    explicit Rig(bool withLoop) : loop(withLoop), out(12, std::vector<float>(kPeriod)), in2(kPeriod), in3(kPeriod), ringL(1 << 16), ringR(1 << 16)
+    explicit Rig(bool withLoop, bool withJacks = false)
+        : loop(withLoop), jacks(withJacks), out(12, std::vector<float>(kPeriod)), in2(kPeriod), in3(kPeriod), ringL(1 << 16), ringR(1 << 16)
     {
         player.setMidi(&midi);
         player.prepare(kRate, kPeriod);
         player.armMeasure(); // no lamps here
         for (int i = 0; i < 12; ++i)
             outPtr[i] = out[static_cast<std::size_t>(i)].data();
-        // No OUT 3-8 in the test; the send only with the loop.
-        for (int p = 1; p <= 3; ++p)
+        // OUT 3-8 only when asked; the send only with the loop.
+        for (int p = 1; p <= 3 && ! jacks; ++p)
             outPtr[2 * p] = outPtr[2 * p + 1] = nullptr;
         if (! loop)
             outPtr[10] = outPtr[11] = nullptr;
@@ -119,6 +124,16 @@ struct Rig
                 const float l = out[0][static_cast<std::size_t>(i)], r = out[1][static_cast<std::size_t>(i)];
                 finite = finite && std::isfinite(l) && std::isfinite(r);
                 energy += static_cast<double>(l * l + r * r);
+                if (jacks)
+                    for (int j = 0; j < 6; ++j)
+                    {
+                        const float v = out[static_cast<std::size_t>(2 + j)][static_cast<std::size_t>(i)];
+                        finite = finite && std::isfinite(v);
+                        jackEnergy[static_cast<std::size_t>(j)] += static_cast<double>(v * v);
+                    }
+                if (compare34)
+                    diff34 = std::max({diff34, static_cast<double>(std::fabs(l - out[2][static_cast<std::size_t>(i)])),
+                                       static_cast<double>(std::fabs(r - out[3][static_cast<std::size_t>(i)]))});
                 if (loop)
                 {
                     sendEnergy += static_cast<double>(out[10][static_cast<std::size_t>(i)] * out[10][static_cast<std::size_t>(i)]);
@@ -169,7 +184,7 @@ void testModule(const LibraryEntry& e)
 {
     std::printf("== %s/%s\n", e.folder.c_str(), e.name.c_str());
     std::string error;
-    auto song = loadSong(e.path, true, kRate, 100, 4, error);
+    auto song = loadSong(e.path, true, 0, kRate, 100, 4, error);
     CHECK(song != nullptr, "load: %s", error.c_str());
     if (! song)
         return;
@@ -445,12 +460,160 @@ void testModule(const LibraryEntry& e)
 
     // The hand-over: a second song replaces the first, the first comes back for deletion.
     std::string error2;
-    auto again = loadSong(e.path, true, kRate, 100, 4, error2);
-    auto third = loadSong(e.path, true, kRate, 100, 4, error2);
+    auto again = loadSong(e.path, true, 0, kRate, 100, 4, error2);
+    auto third = loadSong(e.path, true, 0, kRate, 100, 4, error2);
     CHECK(rig.player.load(std::move(again)), "second hand-over");
     CHECK(! rig.player.load(std::move(third)) && third != nullptr, "a hand-over while one is pending must keep the song");
     rig.run(0.02);
     rig.player.collect();
+}
+
+// The single outs: a channel on OUT 3-4 leaves MAIN; with +MAIN both carry the same signal (also through a stutter
+// loop: the instances move in lockstep); a mono jack; a full pool; the clean mix and the click; the identification
+// beeps; a channel only on a single out does not start the filter route.
+void testOuts(const LibraryEntry& e)
+{
+    std::printf("== single outs: %s\n", e.name.c_str());
+    std::string error;
+    auto song = loadSong(e.path, true, 2, kRate, 100, 4, error);
+    CHECK(song && song->outs.size() == 2 && song->instances() == 4, "load with 2 out stems: %s", error.c_str());
+    if (! song)
+        return;
+    const auto data = song->data;
+    Rig rig(true, true);
+    rig.run(0.5);
+    rig.player.load(std::move(song));
+    rig.player.play();
+    // The loudest channel over the first seconds.
+    std::vector<float> loud(static_cast<std::size_t>(data->channels), 0.0f);
+    for (int k = 0; k < 60; ++k)
+    {
+        rig.run(0.05);
+        for (int c = 0; c < std::min(data->channels, kMaxChannels); ++c)
+            loud[static_cast<std::size_t>(c)] = std::max(loud[static_cast<std::size_t>(c)], rig.player.channelLevel(c));
+    }
+    const int ch = static_cast<int>(std::max_element(loud.begin(), loud.end()) - loud.begin());
+    auto jackRms = [&](int j) { return std::sqrt(rig.jackEnergy[static_cast<std::size_t>(j)] / (kRate * 2.0)); };
+    auto measure2s = [&](double& mainRms) {
+        rig.jackEnergy.fill(0);
+        mainRms = rig.rms(2.0);
+    };
+    rig.player.jump(0, Quantize::Now);
+    rig.player.soloMask = 1ull << ch;
+    rig.run(0.3);
+    double solo = 0, onOut = 0, both = 0;
+    measure2s(solo);
+
+    outs::Layout l;
+    l.dest[static_cast<std::size_t>(ch)] = outs::pair(0);
+    rig.player.setOuts(l);
+    rig.player.jump(0, Quantize::Now);
+    rig.run(0.3);
+    measure2s(onOut);
+    const double j34 = jackRms(0) + jackRms(1);
+    CHECK(rig.player.outStemsUsed() == 1 && rig.player.outsUnserved() == 0, "stems used %d, unserved %x", rig.player.outStemsUsed(),
+          rig.player.outsUnserved());
+    CHECK(onOut < solo * 0.05 + 1e-4, "channel %d still on MAIN: rms %.4f (solo %.4f)", ch + 1, onOut, solo);
+    CHECK(j34 > 1e-4 || solo < 1e-4, "OUT 3-4 silent (MAIN had %.4f)", solo);
+    CHECK(jackRms(2) + jackRms(3) + jackRms(4) + jackRms(5) < 1e-6, "other jacks carry sound");
+
+    // +MAIN: MAIN and OUT 3-4 the same, also across a stutter loop and its return.
+    l.alsoMain = 1ull << ch;
+    rig.player.setOuts(l);
+    rig.run(0.3);
+    rig.compare34 = true;
+    rig.diff34 = 0;
+    measure2s(both);
+    rig.player.padMode = static_cast<int>(PadMode::Loop);
+    rig.pad(2);
+    rig.run(0.6);
+    rig.release(2);
+    rig.run(0.6);
+    rig.compare34 = false;
+    // Not bit-exact right after a channel moved: what only advances while a voice is mixed (the resampler's history,
+    // volume ramps) differs until its next note. Drifting instances would differ by the signal itself (0.1 … 0.6).
+    CHECK(rig.diff34 < 0.03, "+MAIN: MAIN and OUT 3-4 differ by %.6f", rig.diff34);
+    CHECK(both > 1e-4 || solo < 1e-4, "+MAIN: MAIN silent");
+
+    // A filter pad on a channel that is only on a single out: no filter route.
+    l.alsoMain = 0;
+    rig.player.setOuts(l);
+    rig.player.padMode = static_cast<int>(PadMode::Filter);
+    rig.pad(ch % 16);
+    rig.run(0.2);
+    if (ch < 16)
+        CHECK(rig.player.route() == FilterRoute::Off, "filter route %d for a channel only on OUT 3-4", static_cast<int>(rig.player.route()));
+    rig.release(ch % 16);
+    rig.run(0.05);
+
+    // Mono on OUT 5: only that jack.
+    l.dest[static_cast<std::size_t>(ch)] = outs::mono(2);
+    rig.player.setOuts(l);
+    rig.player.jump(0, Quantize::Now);
+    rig.run(0.3);
+    double dummy = 0;
+    measure2s(dummy);
+    CHECK(jackRms(2) > 1e-4 || solo < 1e-4, "OUT 5 silent");
+    CHECK(jackRms(0) + jackRms(1) + jackRms(3) < 1e-6, "mono: other jacks carry sound (%.5f %.5f %.5f)", jackRms(0), jackRms(1), jackRms(3));
+
+    // A full pool: three destinations, two instances.
+    if (data->channels >= 3)
+    {
+        outs::Layout full;
+        for (int c = 0; c < 3; ++c)
+            full.dest[static_cast<std::size_t>(c)] = outs::mono(c);
+        rig.player.setOuts(full);
+        rig.run(0.05);
+        CHECK(rig.player.outStemsUsed() == 2 && __builtin_popcount(rig.player.outsUnserved()) == 1, "full pool: used %d unserved %x",
+              rig.player.outStemsUsed(), rig.player.outsUnserved());
+    }
+
+    // The clean mix on OUT 3-4 (no route on, MAIN VOLUME full): the same as MAIN. The click on OUT 8.
+    rig.player.soloMask = 0;
+    outs::Layout util;
+    util.source[0] = util.source[1] = outs::Source::Clean;
+    util.source[5] = outs::Source::Click;
+    rig.player.setOuts(util);
+    rig.run(0.3);
+    rig.compare34 = true;
+    rig.diff34 = 0;
+    measure2s(dummy);
+    rig.compare34 = false;
+    CHECK(rig.diff34 < 1e-5, "clean mix differs from MAIN by %.6f", rig.diff34);
+    CHECK(jackRms(5) > 1e-3, "no click on OUT 8 (rms %.5f)", jackRms(5));
+    std::printf("  outs: channel %d, solo %.4f, on 3-4 %.4f (MAIN %.5f), click rms %.4f\n", ch + 1, solo, j34, onOut, jackRms(5));
+
+    // The identification beeps, with the song stopped: OUT 3 first, OUT 4 silent meanwhile.
+    rig.player.setOuts(outs::Layout {});
+    rig.player.stop();
+    rig.run(0.1);
+    for (int j = 0; j < 6; ++j)
+        rig.player.takeJackPeak(j);
+    rig.player.identJacks();
+    rig.run(0.1);
+    const float p3 = rig.player.takeJackPeak(0), p4 = rig.player.takeJackPeak(1);
+    CHECK(rig.player.identJack() == 0 && p3 > 0.2f && p4 < 1e-6f, "ident: jack %d, peaks %.3f %.3f", rig.player.identJack(),
+          static_cast<double>(p3), static_cast<double>(p4));
+    rig.run(1.5);
+    CHECK(rig.player.identJack() == 1, "ident after 1.6 s on jack %d", rig.player.identJack());
+    CHECK(rig.finite, "non-finite samples");
+}
+
+void testLayoutText()
+{
+    std::printf("== outs layout text\n");
+    outs::Layout l;
+    l.dest[0] = outs::pair(0);
+    l.dest[1] = outs::mono(2);
+    l.dest[6] = outs::pair(2);
+    l.alsoMain = 1ull << 6;
+    l.source[4] = outs::Source::Return;
+    const std::string t = outs::format(l);
+    CHECK(t == "src=ch,ch,ch,ch,ret,ch 1=3-4 2=5 7=7-8+", "format: %s", t.c_str());
+    CHECK(outs::parse(t) == l, "parse(format) differs");
+    CHECK(outs::tapJack(outs::kMain, 0) == outs::mono(0) && outs::tapJack(outs::mono(0), 1) == outs::pair(0)
+              && outs::tapJack(outs::pair(0), 0) == outs::mono(1) && outs::tapJack(outs::mono(1), 1) == outs::kMain,
+          "tap rules");
 }
 
 void testNoLoop(const LibraryEntry& e)
@@ -460,7 +623,7 @@ void testNoLoop(const LibraryEntry& e)
     rig.run(0.05);
     CHECK(! rig.player.stems(), "stems without a loop");
     std::string error;
-    auto song = loadSong(e.path, rig.player.stems(), kRate, 100, 4, error);
+    auto song = loadSong(e.path, rig.player.stems(), 0, kRate, 100, 4, error);
     CHECK(song && ! song->wet, "load without stems");
     rig.player.load(std::move(song));
     rig.player.play();
@@ -482,6 +645,9 @@ int main(int argc, char** argv)
     for (const auto& e : library.entries())
         testModule(e);
     testNoLoop(library.entries().front());
+    testLayoutText();
+    for (const auto& e : library.entries())
+        testOuts(e);
     std::printf(failures == 0 ? "ALL PASSED\n" : "%d FAILED\n", failures);
     return failures == 0 ? 0 : 1;
 }

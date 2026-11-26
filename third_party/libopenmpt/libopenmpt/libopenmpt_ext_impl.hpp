@@ -126,6 +126,8 @@ public:
 
 	void rewind() override;
 
+	void set_channel_silent( std::int32_t channel, bool silent ) override;
+
 private:
 
 	bool valid_position( std::int32_t order, std::int32_t row ) const;

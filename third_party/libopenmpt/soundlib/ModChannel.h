@@ -158,6 +158,9 @@ struct ModChannel
 	bool isPaused : 1;                       // Don't mix or increment channel position, but keep the note alive
 	bool portaTargetReached : 1;             // Tone portamento is finished
 	bool fcPortaTick : 1;                    // Future Composer portamento state
+	// Track16 addition (not upstream): the voice plays on as usual (envelopes, position, NNA, volumes) but the mixer
+	// leaves it out, so several instances of one module stay in lockstep while each mixes other channels.
+	bool track16Silent = false;
 
 	//-->Variables used to make user-definable tuning modes work with pattern effects.
 	//If true, freq should be recalculated in ReadNote() on first tick.

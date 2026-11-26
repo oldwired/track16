@@ -11,6 +11,7 @@
 #include <fstream>
 #include <iterator>
 #include <sstream>
+#include <stdexcept>
 
 namespace app
 {
@@ -59,6 +60,10 @@ std::string lower(std::string s)
 }
 } // namespace
 
+Stem::Stem() = default;
+Stem::Stem(Stem&&) noexcept = default;
+Stem& Stem::operator=(Stem&&) noexcept = default;
+Stem::~Stem() = default;
 Song::Song() = default;
 Song::~Song() = default;
 
@@ -81,7 +86,8 @@ bool looksLikeModule(const std::string& fileName)
     return prefix == "mod" || prefix == "xm" || prefix == "s3m" || prefix == "it";
 }
 
-std::unique_ptr<Song> loadSong(const std::string& path, bool stems, int sampleRate, int stereoSeparation, int interpolation, std::string& error)
+std::unique_ptr<Song> loadSong(const std::string& path, bool stems, int outStems, int sampleRate, int stereoSeparation, int interpolation,
+                               std::string& error)
 {
     std::ifstream in(path, std::ios::binary);
     if (! in)
@@ -93,11 +99,32 @@ std::unique_ptr<Song> loadSong(const std::string& path, bool stems, int sampleRa
     static LogBuffer logBuffer;
     static std::ostream log(&logBuffer);
     auto song = std::make_unique<Song>();
+    auto make = [&](Stem& s) {
+        s.m = open(bytes, log, stereoSeparation, interpolation);
+        s.i = static_cast<openmpt::ext::interactive*>(s.m->get_interface(openmpt::ext::interactive_id));
+        s.i2 = static_cast<openmpt::ext::interactive2*>(s.m->get_interface(openmpt::ext::interactive2_id));
+        s.p = static_cast<openmpt::ext::track16_position*>(s.m->get_interface(openmpt::ext::track16_position_id));
+        if (s.i == nullptr || s.p == nullptr)
+            throw std::runtime_error("libopenmpt without the interactive or track16_position extension");
+        // The mixer for the device's rate now (a read of 0 frames only sets it up), not on the audio thread.
+        float none[1] = {};
+        s.m->read(sampleRate, 0, none, none);
+    };
     try
     {
-        song->dry = open(bytes, log, stereoSeparation, interpolation);
+        make(song->dry);
         if (stems)
-            song->wet = open(bytes, log, stereoSeparation, interpolation);
+            make(song->wet);
+        song->outs.resize(static_cast<std::size_t>(std::clamp(outStems, 0, 6)));
+        for (auto& s : song->outs)
+            make(s);
+        // The other instances start with every channel silent (the player unsilences what each carries); channels
+        // past kMaxChannels are never routed, so they are only ever heard from the dry one.
+        song->each([&](Stem& s) {
+            if (&s != &song->dry)
+                for (int c = 0; c < s.m->get_num_channels(); ++c)
+                    s.p->set_channel_silent(c, true);
+        });
     }
     catch (const std::exception& e)
     {
@@ -105,36 +132,9 @@ std::unique_ptr<Song> loadSong(const std::string& path, bool stems, int sampleRa
         return error = e.what(), nullptr;
     }
     log.flush();
-    song->dryI = static_cast<openmpt::ext::interactive*>(song->dry->get_interface(openmpt::ext::interactive_id));
-    song->dryI2 = static_cast<openmpt::ext::interactive2*>(song->dry->get_interface(openmpt::ext::interactive2_id));
-    if (song->wet)
-        song->wetI = static_cast<openmpt::ext::interactive*>(song->wet->get_interface(openmpt::ext::interactive_id));
-    song->dryP = static_cast<openmpt::ext::track16_position*>(song->dry->get_interface(openmpt::ext::track16_position_id));
-    if (song->wet)
-        song->wetP = static_cast<openmpt::ext::track16_position*>(song->wet->get_interface(openmpt::ext::track16_position_id));
-    if (song->dryI == nullptr || song->dryP == nullptr || (song->wet && (song->wetI == nullptr || song->wetP == nullptr)))
-        return error = "libopenmpt without the interactive or track16_position extension", nullptr;
-    try
-    {
-        // The mixer for the device's rate now (a read of 0 frames only sets it up), not on the audio thread.
-        float none[1] = {};
-        song->dry->read(sampleRate, 0, none, none);
-        if (song->wet)
-        {
-            song->wet->read(sampleRate, 0, none, none);
-            // The wet instance starts with every channel muted (the player unmutes the routed ones); channels past
-            // kMaxChannels are never routed, so they only ever play on the dry one.
-            for (int c = 0; c < song->wet->get_num_channels(); ++c)
-                song->wetI->set_channel_mute_status(c, true);
-        }
-    }
-    catch (const std::exception& e)
-    {
-        return error = e.what(), nullptr;
-    }
 
     // The snapshot.
-    auto& m = *song->dry;
+    auto& m = *song->dry.m;
     auto d = std::make_shared<SongData>();
     d->path = path;
     const auto slash = path.rfind('/');

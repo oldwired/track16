@@ -18,6 +18,10 @@
 //   filter_latency=<frames>     the analog filter loop's latency (default: measured at start)
 //   filter_send_gain=<0…1>      the filter send's fixed gain (default 0.5, −6 dB; the return is brought back by 1/gain)
 //   main_gain=<0.1…1>           the main DAC's fixed gain (default 0.5, −6 dB as the stock firmware: headroom for DRIVE)
+//   out_stems=<0…6>             libopenmpt instances for the single outs OUT 3–8 (default 4; each costs CPU and memory)
+//   outs=<layout>               the single outs' layout for modules without their own (app/Outs.h), e.g.
+//                               "src=ch,ch,ch,ch,clean,click 1=3-4 2=3-4"
+//   outs_ident=1                at start, beep on each single out (1 beep on OUT 3, 2 on OUT 4, …): which jack is which
 // and passes the rest to the platform (audio_period, audio_periods, filter_loop, …: hw/imx6/Imx6Platform.cpp).
 #include "app/GlDisplay.h"
 #include "app/Log.h"
@@ -200,6 +204,14 @@ int run()
     screenConfig.autoplay = settings["autoplay"] == "1";
     screenConfig.stereoSeparation = player.stereoSeparation.load();
     screenConfig.interpolation = player.interpolation.load();
+    screenConfig.outStems = std::clamp(number(settings, "out_stems", 4), 0, outs::kMaxStems);
+    screenConfig.outsDefault = settings["outs"];
+    screenConfig.dataDir = machine->paths().dataDir;
+    if (settings["outs_ident"] == "1")
+    {
+        player.identJacks();
+        logLine("OUTS ident at start: 1 beep on OUT 3, 2 on OUT 4 ... 6 on OUT 8");
+    }
     Screen screen(player, midi, screenConfig);
     screen.onQuit = [] { platform::requestQuit(); };
     std::string error;
@@ -303,10 +315,11 @@ int run()
             const auto& st = audioNow;
             const auto pos = player.position();
             const auto dbfs = [](float v) { return v > 1e-6f ? 20.0 * std::log10(static_cast<double>(v)) : -120.0; };
-            logLine("STAT fps=%.0f dsp=%.1f%% dsp_max=%.1f%% xruns=%llu playing=%d order=%d row=%d route=%d loop_latency=%d%s"
+            logLine("STAT fps=%.0f dsp=%.1f%% dsp_max=%.1f%% xruns=%llu playing=%d order=%d row=%d route=%d outs=%d/%d%s loop_latency=%d%s"
                     " loop_live=%d loop_frames=%llu loop_drops=%llu send_peak=%.1fdB return_peak=%.1fdB midi_in=%d midi_out=%d midi_sent=%d",
                     static_cast<double>(fps), static_cast<double>(player.loadAverage() * 100), static_cast<double>(player.takeLoadMax() * 100),
                     static_cast<unsigned long long>(st.xruns), player.playing() ? 1 : 0, pos.order, pos.row, static_cast<int>(player.route()),
+                    player.outStemsUsed(), player.outStemsTotal(), player.outsUnserved() != 0 ? " (pool full)" : "",
                     player.latencyFrames(), player.stems() ? (player.latencyMeasured() ? " (measured)" : " (fallback)") : " (no loop)",
                     st.loopLive ? 1 : 0, static_cast<unsigned long long>(st.loopFrames), static_cast<unsigned long long>(st.loopDrops),
                     dbfs(sendPeak), dbfs(returnPeak), midi.inputCount(), midi.outputCount(), midi.sentCount());

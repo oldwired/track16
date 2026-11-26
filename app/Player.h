@@ -20,8 +20,15 @@
 //   master    MAIN = return                          SEND = dry + wet
 // delay() = the loop's measured latency N, so the direct path stays aligned with the filtered one. A route change
 // switches SEND at once and MAIN N frames later (when the return carries the new send), both cross-faded over kFade.
+//
+// Single outs (OUT 3–8, app/Outs.h): channels sent to a jack or jack pair play on an instance of the song's "outs"
+// pool, one per destination in use, given out when a destination gets its first channel and taken back when its last
+// one leaves. Those streams are delayed like MAIN, so they stay sample-aligned with it, and take GAIN and the strip's
+// volume but not MAIN VOLUME. A jack can carry a utility signal instead: the clean mix (MAIN's channels before the
+// filter and DRIVE), the filter's return, or a click on the beat.
 #pragma once
 
+#include "app/Outs.h"
 #include "app/Queue.h"
 #include "app/Song.h"
 
@@ -36,7 +43,7 @@
 
 namespace app
 {
-enum class PadMode : int { Filter, Mute, Loop, Play, Kit };
+enum class PadMode : int { Filter, Mute, Loop, Play, Kit, Outs };
 enum class Quantize : int { Pattern, Beat, Now };
 enum class FilterRoute : int { Off, Channels, Master };
 
@@ -104,6 +111,8 @@ public:
     void midiNote(int note, int velocity) noexcept; // MIDI in: plays the selected instrument
     void setStripMode(int mode) noexcept;            // StripMode; ends what the strip did in the old mode
     void setStripHold(bool on) noexcept;             // HOLD: the strip keeps its last value after the finger leaves
+    void setOuts(const outs::Layout&) noexcept;      // the single outs' layout (the audio thread takes it next period)
+    void identJacks() noexcept { identArm_.store(true, std::memory_order_release); } // beeps: 1 on OUT 3, 2 on OUT 4, …
 
     // Settings (message thread writes, audio thread reads once per period).
     std::atomic<int> padMode {static_cast<int>(PadMode::Mute)};
@@ -162,6 +171,13 @@ public:
     bool stripLatched() const noexcept { return stripLatchPub_.load(std::memory_order_relaxed); }
     float overLevel() const noexcept { return overLevel_.load(std::memory_order_relaxed); } // held DAC peak of the driven signal
     bool over() const noexcept { return overLevel() >= kOverThreshold; }                      // the OVER lamp
+    // the single outs: instances in use / in the pool, destinations (bits 1–9) with channels but no free instance,
+    // each jack's peak since the last call, and the jack the identification beeps on now (−1 = none)
+    int outStemsUsed() const noexcept { return outStemsUsed_.load(std::memory_order_relaxed); }
+    int outStemsTotal() const noexcept { return outStemsTotal_.load(std::memory_order_relaxed); }
+    std::uint16_t outsUnserved() const noexcept { return outsUnserved_.load(std::memory_order_relaxed); }
+    float takeJackPeak(int jack0) noexcept { return jackPeak_[static_cast<std::size_t>(jack0 % outs::kJacks)].exchange(0.0f); }
+    int identJack() const noexcept { return identJackPub_.load(std::memory_order_relaxed); }
 
     // platform::AudioProcessor
     void prepare(double sampleRate, int maxDeviceFrames) override;
@@ -195,6 +211,8 @@ private:
     void stopLoop(bool returnInTime) noexcept;
     void startLoop(int rows, int owner) noexcept; // owner: the LOOP pad, or kStripOwner
     void stripApply() noexcept;                   // the strip's effect from its mode, position, touch and HOLD
+    int playNote(int instrument0, int note, double velocity); // may throw (libopenmpt); returns the dry voice
+    void noteOff(int channel) noexcept;
     // Frames from the engine to the jacks: the output buffer plus the loop-latency delay of the main path.
     double outputLatency() const noexcept { return audioLatencyFrames.load(std::memory_order_relaxed) + delayNow_; }
     int validOrder(int order) const noexcept;
@@ -251,7 +269,7 @@ private:
     std::uint64_t filterHeld_ = 0, filterLatchBits_ = 0;
     std::array<int, 16> filterPadChannel_ {};  // the channel a held FILTER pad routes (the page may change while held)
     std::array<std::uint16_t, 16> padHitOn_ {}; // the hit each pad's last PadOn was
-    std::uint64_t appliedDry_ = ~0ull, appliedWet_ = ~0ull;
+    std::uint64_t appliedMuted_ = 0, appliedDry_ = ~0ull, appliedWet_ = ~0ull; // mutes (all instances), silence per instance
     std::uint64_t seenMute_ = ~0ull, seenSolo_ = ~0ull;
     bool masksDirty_ = true, masksForce_ = true;
     // pads (Play / Kit): the channel each pad's note plays on
@@ -270,7 +288,10 @@ private:
     };
     std::array<RouteChange, 8> routeQueue_ {};
     int routeHead_ = 0, routeCount_ = 0;
-    std::vector<float> delayL_, delayR_, delayWL_, delayWR_;
+    // The delay lines (kMaxDelay frames each): MAIN's two stems, the click, then each out stem's left and right.
+    static constexpr int kLaneDryL = 0, kLaneDryR = 1, kLaneWetL = 2, kLaneWetR = 3, kLaneClick = 4, kLaneOut0 = 5;
+    static constexpr int kLanes = kLaneOut0 + 2 * outs::kMaxStems;
+    std::vector<float> lanes_;
     static constexpr float kDcPole = 0.999f;          // the return's DC blocker (about 7 Hz)
     float dcInL_ = 0, dcInR_ = 0, dcOutL_ = 0, dcOutR_ = 0, returnGain_ = 2.0f, outputGain_ = 1.0f;
     bool filterInverse_ = false; // ACTIVE with FILTER pads held: the held channels bypass the filter, the rest go through it
@@ -285,6 +306,24 @@ private:
     bool measureLive_ = false; // a re-measurement while a song may play (keep the old latency if it fails)
     float measureNoise_ = 0;
     std::vector<float> measureBuf_;
+    // the single outs: the layout as the audio thread applies it, which destination each out stem serves (0 = free),
+    // the instance each channel's VU comes from (−1 = dry/wet), the channels MAIN carries
+    std::array<std::uint8_t, kMaxChannels> chDest_ {};
+    std::uint64_t alsoMain_ = 0, mainMask_ = ~0ull;
+    std::array<outs::Source, outs::kJacks> src_ {};
+    std::array<std::uint8_t, outs::kMaxStems> stemDest_ {};
+    std::array<std::uint64_t, outs::kMaxStems> appliedOut_ {};
+    std::array<std::int8_t, kMaxChannels> vuStem_ {};
+    std::uint32_t seenOutsSerial_ = 0;
+    bool clickUsed_ = false, identOn_ = false;
+    int clickLeft_ = 0, identT_ = 0;
+    float clickPhase_ = 0, clickStep_ = 0, clickAmp_ = 0, clickDecay_ = 0;
+    // written by setOuts()
+    std::array<std::atomic<std::uint8_t>, kMaxChannels> outDest_ {};
+    std::array<std::atomic<std::uint8_t>, outs::kJacks> jackSource_ {};
+    std::atomic<std::uint64_t> outAlsoMain_ {0};
+    std::atomic<std::uint32_t> outsSerial_ {0};
+    std::atomic<bool> identArm_ {false};
 
     // published
     std::atomic<int> order__ {0}, row__ {0}, pattern__ {0}, speed_ {6}, queuedOrder_ {-1}, loopLength_ {0}, route_ {0};
@@ -298,5 +337,8 @@ private:
     std::atomic<std::uint64_t> rowStartNs_ {0}, filterOn_ {0}, filterLatch_ {0}, padHeld_ {0}, serial_ {0}, dropped_ {0};
     std::array<std::atomic<float>, kMaxChannels> vu_ {};
     std::array<std::atomic<float>, 2> peak_ {};
+    std::array<std::atomic<float>, outs::kJacks> jackPeak_ {};
+    std::atomic<int> outStemsUsed_ {0}, outStemsTotal_ {0}, identJackPub_ {-1};
+    std::atomic<std::uint16_t> outsUnserved_ {0};
 };
 } // namespace app

@@ -60,6 +60,8 @@ Player::Player()
     noteChannel_.fill(-1);
     midiNoteOn_.fill(-1);
     filterPadChannel_.fill(-1);
+    vuStem_.fill(-1);
+    appliedOut_.fill(~0ull);
 }
 
 Player::~Player()
@@ -112,6 +114,16 @@ void Player::midiNote(int note, int velocity) noexcept
     post({Event::Note, static_cast<std::int16_t>(note & 127), static_cast<std::int16_t>(velocity)});
 }
 
+void Player::setOuts(const outs::Layout& l) noexcept
+{
+    for (int c = 0; c < kMaxChannels; ++c)
+        outDest_[static_cast<std::size_t>(c)].store(l.dest[static_cast<std::size_t>(c)], std::memory_order_relaxed);
+    outAlsoMain_.store(l.alsoMain, std::memory_order_relaxed);
+    for (int j = 0; j < outs::kJacks; ++j)
+        jackSource_[static_cast<std::size_t>(j)].store(static_cast<std::uint8_t>(l.source[static_cast<std::size_t>(j)]), std::memory_order_relaxed);
+    outsSerial_.fetch_add(1, std::memory_order_release);
+}
+
 Player::Position Player::position() const noexcept
 {
     return {order__.load(std::memory_order_relaxed), row__.load(std::memory_order_relaxed), pattern__.load(std::memory_order_relaxed)};
@@ -138,10 +150,7 @@ bool Player::push(const platform::TriggerNow& t) noexcept
 void Player::prepare(double sampleRate, int)
 {
     sampleRate_ = sampleRate > 0 ? sampleRate : 44100.0;
-    delayL_.assign(kMaxDelay, 0.0f);
-    delayR_.assign(kMaxDelay, 0.0f);
-    delayWL_.assign(kMaxDelay, 0.0f);
-    delayWR_.assign(kMaxDelay, 0.0f);
+    lanes_.assign(static_cast<std::size_t>(kLanes) * kMaxDelay, 0.0f);
     measureBuf_.assign(8192, 0.0f);
     delayWrite_ = 0;
 }
@@ -168,8 +177,14 @@ void Player::adopt(Song* song) noexcept
     loopPad_ = -1;
     filterHeld_ = filterLatchBits_ = 0;
     filterPadChannel_.fill(-1);
-    appliedDry_ = 0;    // a fresh module has nothing muted …
-    appliedWet_ = ~0ull; // … but the wet one (loadSong mutes all of it)
+    appliedMuted_ = 0;   // a fresh module has nothing muted, nothing silent on the dry instance …
+    appliedDry_ = 0;
+    appliedWet_ = ~0ull; // … and everything silent on the other ones (loadSong)
+    appliedOut_.fill(~0ull);
+    stemDest_.fill(outs::kMain);
+    vuStem_.fill(-1);
+    mainMask_ = ~0ull;
+    clickLeft_ = 0;
     masksDirty_ = true;
     appliedTempo_ = appliedPitch_ = -1;
     appliedSep_ = appliedInterp_ = -1;
@@ -244,9 +259,7 @@ void Player::seekNow(int order, int row) noexcept
         return;
     order = validOrder(order);
     row = std::clamp(row, 0, std::max(0, data_->patternRows(data_->orderPattern(order)) - 1));
-    song_->dryP->jump_to_position(order, row);
-    if (song_->wetP != nullptr)
-        song_->wetP->jump_to_position(order, row);
+    song_->each([&](Stem& s) { s.p->jump_to_position(order, row); });
     order_ = songOrder_ = order;
     row_ = songRow_ = row;
     pattern_ = data_->orderPattern(order);
@@ -260,9 +273,7 @@ void Player::rewindSong() noexcept
 {
     if (song_ == nullptr)
         return;
-    song_->dryP->rewind();
-    if (song_->wetP != nullptr)
-        song_->wetP->rewind();
+    song_->each([](Stem& s) { s.p->rewind(); });
     order_ = songOrder_ = 0;
     row_ = songRow_ = 0;
     pattern_ = data_->orderPattern(0);
@@ -275,7 +286,7 @@ void Player::rewindSong() noexcept
 
 void Player::captureNatural() noexcept
 {
-    song_->dryP->get_next_position(natOrder_, natRow_);
+    song_->dry.p->get_next_position(natOrder_, natRow_);
     naturalValid_ = true;
     nextWhy_ = Next::Natural;
 }
@@ -286,18 +297,14 @@ void Player::scheduleNext(int order, int row, Next why) noexcept
     {
         if (nextWhy_ != Next::Natural) // give the module its own next row back
         {
-            song_->dryP->set_next_position(natOrder_, natRow_);
-            if (song_->wetP != nullptr)
-                song_->wetP->set_next_position(natOrder_, natRow_);
+            song_->each([&](Stem& s) { s.p->set_next_position(natOrder_, natRow_); });
         }
         nextWhy_ = Next::Natural;
         return;
     }
     if (why == nextWhy_ && order == nextOrder_ && row == nextRow_)
         return;
-    song_->dryP->set_next_position(order, row);
-    if (song_->wetP != nullptr)
-        song_->wetP->set_next_position(order, row);
+    song_->each([&](Stem& s) { s.p->set_next_position(order, row); });
     nextWhy_ = why;
     nextOrder_ = order;
     nextRow_ = row;
@@ -309,13 +316,9 @@ void Player::reassertNext() noexcept
     if (nextWhy_ == Next::Natural)
         return;
     std::int32_t o = 0, r = 0;
-    song_->dryP->get_next_position(o, r);
+    song_->dry.p->get_next_position(o, r);
     if (o != nextOrder_ || r != nextRow_)
-    {
-        song_->dryP->set_next_position(nextOrder_, nextRow_);
-        if (song_->wetP != nullptr)
-            song_->wetP->set_next_position(nextOrder_, nextRow_);
-    }
+        song_->each([&](Stem& s) { s.p->set_next_position(nextOrder_, nextRow_); });
 }
 
 // What the row after this one is: the stutter loop, a due jump, the loop's return, the pattern loop, or the module's.
@@ -502,6 +505,19 @@ void Player::onRow(int order, int row, std::uint64_t frame) noexcept
         rowSeconds_.store(rowFrames_ / sampleRate_, std::memory_order_relaxed);
     if (reposition)
         midiReposition(frame);
+    if (clickUsed_)
+    {
+        const int rpb = std::max(1, rowsPerBeat.load(std::memory_order_relaxed));
+        if (row % rpb == 0)
+        {
+            const bool bar = row % (4 * rpb) == 0;
+            clickPhase_ = 0;
+            clickStep_ = static_cast<float>(2.0 * 3.14159265358979 * (bar ? 1600.0 : 1000.0) / sampleRate_);
+            clickAmp_ = bar ? 0.8f : 0.5f;
+            clickDecay_ = static_cast<float>(std::exp(-1.0 / (0.008 * sampleRate_))); // 8 ms
+            clickLeft_ = static_cast<int>(0.04 * sampleRate_);
+        }
+    }
     clockRow(frame);
     midiRowNotes(pattern_, row_, frame);
     planNext();
@@ -590,6 +606,7 @@ void Player::padOn(int pad, int velocity, int hit) noexcept
         }
         break;
     case PadMode::Mute: break; // the UI toggles mutes (it knows SHIFT)
+    case PadMode::Outs: break; // the UI edits the layout (pad + STEP)
     case PadMode::Loop:
         if (kLoopLengths[pad] > 0)
             startLoop(kLoopLengths[pad], pad);
@@ -605,9 +622,9 @@ void Player::padOn(int pad, int velocity, int hit) noexcept
             break;
         try
         {
-            if (padChannel_[static_cast<std::size_t>(pad)] >= 0 && song_->dryI2 != nullptr)
-                song_->dryI2->note_off(padChannel_[static_cast<std::size_t>(pad)]);
-            padChannel_[static_cast<std::size_t>(pad)] = song_->dryI->play_note(inst, note, std::clamp(velocity / 127.0, 0.05, 1.0), 0.0);
+            if (padChannel_[static_cast<std::size_t>(pad)] >= 0)
+                noteOff(padChannel_[static_cast<std::size_t>(pad)]);
+            padChannel_[static_cast<std::size_t>(pad)] = playNote(inst, note, std::clamp(velocity / 127.0, 0.05, 1.0));
         }
         catch (...)
         {
@@ -616,6 +633,36 @@ void Player::padOn(int pad, int velocity, int hit) noexcept
         break;
     }
     }
+}
+
+// A live note (pads, MIDI in) plays on every instance, so their voice allocation stays the same; only MAIN hears it.
+int Player::playNote(int instrument0, int note, double velocity)
+{
+    int channel = -1;
+    song_->each([&](Stem& s) {
+        const int c = s.i->play_note(instrument0, note, velocity, 0.0);
+        if (&s == &song_->dry)
+            channel = c;
+        else
+            s.p->set_channel_silent(c, true);
+    });
+    return channel;
+}
+
+void Player::noteOff(int channel) noexcept
+{
+    song_->each([&](Stem& s) {
+        try
+        {
+            if (s.i2 != nullptr)
+                s.i2->note_off(channel);
+            else
+                s.i->stop_note(channel);
+        }
+        catch (...)
+        {
+        }
+    });
 }
 
 void Player::padOff(int pad) noexcept
@@ -633,16 +680,7 @@ void Player::padOff(int pad) noexcept
         stopLoop(true);
     if (auto& ch = padChannel_[static_cast<std::size_t>(pad)]; ch >= 0)
     {
-        try
-        {
-            if (song_->dryI2 != nullptr)
-                song_->dryI2->note_off(ch);
-            else
-                song_->dryI->stop_note(ch);
-        }
-        catch (...)
-        {
-        }
+        noteOff(ch);
         ch = -1;
     }
 }
@@ -773,16 +811,13 @@ void Player::handle(const Event& e) noexcept
         {
             if (ch >= 0)
             {
-                if (song_->dryI2 != nullptr)
-                    song_->dryI2->note_off(ch);
-                else
-                    song_->dryI->stop_note(ch);
+                noteOff(ch);
                 ch = -1;
             }
             const int count = data_->numInstruments > 0 ? data_->numInstruments : data_->numSamples;
             const int inst = instrument.load(std::memory_order_relaxed);
             if (e.b > 0 && inst >= 0 && inst < count && e.a < 120)
-                ch = song_->dryI->play_note(inst, e.a, e.b / 127.0, 0.0);
+                ch = playNote(inst, e.a, e.b / 127.0);
         }
         catch (...)
         {
@@ -793,26 +828,95 @@ void Player::handle(const Event& e) noexcept
     }
 }
 
+// Every instance's mute mask. The single outs first: the destinations that have channels get an instance from the pool
+// (one keeps the instance it had; a destination on a jack that carries a utility signal gets none), then
+//   out stem k   the channels on its destination
+//   dry / wet    the channels on MAIN (not on a single out, or with +MAIN), split by the filter routing
+// and every muted channel is muted everywhere.
 void Player::applyMasks() noexcept
 {
     if (song_ == nullptr)
         return;
     const std::uint64_t solo = soloMask.load(std::memory_order_relaxed);
     const std::uint64_t muted = muteMask.load(std::memory_order_relaxed) | (solo != 0 ? ~solo : 0);
-    const bool split = song_->wet != nullptr && stems_.load(std::memory_order_relaxed);
-    const std::uint64_t picked = filterHeld_ | filterLatchBits_;
-    const std::uint64_t all = data_->channels >= 64 ? ~0ull : (1ull << std::max(0, data_->channels)) - 1;
-    const std::uint64_t routed = ! split ? 0 : filterInverse_ ? (all & ~picked) : picked;
-    const std::uint64_t dry = muted | routed, wet = muted | ~routed;
     const int n = std::min(data_->channels, kMaxChannels);
+    const int nOut = static_cast<int>(song_->outs.size());
+    unsigned channelJacks = 0;
+    for (int j = 0; j < outs::kJacks; ++j)
+        if (src_[static_cast<std::size_t>(j)] == outs::Source::Channels)
+            channelJacks |= 1u << j;
+    unsigned used = 0;
+    for (int c = 0; c < n; ++c)
+        if (const auto d = chDest_[static_cast<std::size_t>(c)]; d != outs::kMain && d < outs::kDests && (outs::jackMask(d) & ~channelJacks) == 0)
+            used |= 1u << d;
+    unsigned served = 0;
+    for (int k = 0; k < nOut; ++k)
+    {
+        auto& d = stemDest_[static_cast<std::size_t>(k)];
+        if (d != outs::kMain && ! ((used >> d) & 1u))
+            d = outs::kMain; // free again
+        served |= d != outs::kMain ? 1u << d : 0u;
+    }
+    for (std::uint8_t d = 1; d < outs::kDests; ++d)
+        if (((used >> d) & 1u) && ! ((served >> d) & 1u))
+            for (int k = 0; k < nOut; ++k)
+                if (stemDest_[static_cast<std::size_t>(k)] == outs::kMain)
+                {
+                    stemDest_[static_cast<std::size_t>(k)] = d;
+                    served |= 1u << d;
+                    break;
+                }
+    std::array<std::uint64_t, outs::kMaxStems> stemMask {};
+    std::uint64_t outMask = 0;
+    int stemsUsed = 0;
+    for (int k = 0; k < nOut; ++k)
+        stemsUsed += stemDest_[static_cast<std::size_t>(k)] != outs::kMain ? 1 : 0;
+    for (int c = 0; c < n; ++c)
+    {
+        vuStem_[static_cast<std::size_t>(c)] = -1;
+        const auto d = chDest_[static_cast<std::size_t>(c)];
+        if (d == outs::kMain || d >= outs::kDests || ! ((served >> d) & 1u))
+            continue;
+        for (int k = 0; k < nOut; ++k)
+            if (stemDest_[static_cast<std::size_t>(k)] == d)
+            {
+                stemMask[static_cast<std::size_t>(k)] |= bit(c);
+                outMask |= bit(c);
+                if (! ((alsoMain_ >> c) & 1u))
+                    vuStem_[static_cast<std::size_t>(c)] = static_cast<std::int8_t>(k);
+            }
+    }
+    outsUnserved_.store(static_cast<std::uint16_t>(used & ~served), std::memory_order_relaxed);
+    outStemsUsed_.store(stemsUsed, std::memory_order_relaxed);
+    outStemsTotal_.store(nOut, std::memory_order_relaxed);
+
+    const std::uint64_t all = data_->channels >= 64 ? ~0ull : (1ull << std::max(0, data_->channels)) - 1;
+    const std::uint64_t onMain = all & (~outMask | alsoMain_);
+    mainMask_ = onMain;
+    const bool split = song_->wet && stems_.load(std::memory_order_relaxed);
+    const std::uint64_t picked = filterHeld_ | filterLatchBits_;
+    const std::uint64_t routed = ! split ? 0 : filterInverse_ ? (all & ~picked) : picked;
+    // Mutes: the same in every instance (a muted channel stands still, so all must agree). Routing: silence per instance.
+    const std::uint64_t dry = ~onMain | routed, wet = ~onMain | ~routed;
     for (int c = 0; c < n; ++c)
     {
         const std::uint64_t b = bit(c);
+        if (masksForce_ || ((muted ^ appliedMuted_) & b))
+            song_->each([&](Stem& s) { s.i->set_channel_mute_status(c, (muted & b) != 0); });
         if (masksForce_ || ((dry ^ appliedDry_) & b))
-            song_->dryI->set_channel_mute_status(c, (dry & b) != 0);
-        if (song_->wetI != nullptr && (masksForce_ || ((wet ^ appliedWet_) & b)))
-            song_->wetI->set_channel_mute_status(c, (wet & b) != 0);
+            song_->dry.p->set_channel_silent(c, (dry & b) != 0);
+        if (song_->wet && (masksForce_ || ((wet ^ appliedWet_) & b)))
+            song_->wet.p->set_channel_silent(c, (wet & b) != 0);
+        for (int k = 0; k < nOut; ++k)
+        {
+            const std::uint64_t m = ~stemMask[static_cast<std::size_t>(k)];
+            if (masksForce_ || ((m ^ appliedOut_[static_cast<std::size_t>(k)]) & b))
+                song_->outs[static_cast<std::size_t>(k)].p->set_channel_silent(c, (m & b) != 0);
+        }
     }
+    appliedMuted_ = muted;
+    for (int k = 0; k < nOut; ++k)
+        appliedOut_[static_cast<std::size_t>(k)] = ~stemMask[static_cast<std::size_t>(k)];
     masksForce_ = false;
     // MIDI follows the mute: a channel muted now ends its note.
     if (midiFollowMute.load(std::memory_order_relaxed))
@@ -838,11 +942,7 @@ void Player::applySettings() noexcept
     const int sep = std::clamp(stereoSeparation.load(std::memory_order_relaxed), 0, 200);
     int interp = interpolation.load(std::memory_order_relaxed);
     interp = interp >= 8 ? 8 : interp >= 4 ? 4 : interp >= 2 ? 2 : 1;
-    auto each = [this](auto&& f) {
-        f(*song_->dry, *song_->dryI);
-        if (song_->wet)
-            f(*song_->wet, *song_->wetI);
-    };
+    auto each = [this](auto&& f) { song_->each([&](Stem& s) { f(*s.m, *s.i); }); };
     if (tempo != appliedTempo_)
     {
         each([&](openmpt::module_ext&, openmpt::ext::interactive& i) { i.set_tempo_factor(tempo); });
@@ -973,6 +1073,20 @@ void Player::process(const platform::AudioIO& io) noexcept
         seenSolo_ = s;
         masksDirty_ = true;
     }
+    if (const auto serial = outsSerial_.load(std::memory_order_acquire); serial != seenOutsSerial_)
+    {
+        seenOutsSerial_ = serial;
+        for (int c = 0; c < kMaxChannels; ++c)
+            chDest_[static_cast<std::size_t>(c)] = outDest_[static_cast<std::size_t>(c)].load(std::memory_order_relaxed);
+        alsoMain_ = outAlsoMain_.load(std::memory_order_relaxed);
+        clickUsed_ = false;
+        for (int j = 0; j < outs::kJacks; ++j)
+        {
+            src_[static_cast<std::size_t>(j)] = static_cast<outs::Source>(jackSource_[static_cast<std::size_t>(j)].load(std::memory_order_relaxed));
+            clickUsed_ = clickUsed_ || src_[static_cast<std::size_t>(j)] == outs::Source::Click;
+        }
+        masksDirty_ = true;
+    }
     if (! holdEvents)
     {
         if (Song* song = incoming_.exchange(nullptr, std::memory_order_acq_rel))
@@ -1005,7 +1119,7 @@ void Player::process(const platform::AudioIO& io) noexcept
     bool inverse = false;
     if (loop && ! measuringNow)
     {
-        const bool picked = (filterHeld_ | filterLatchBits_) != 0 && song_ != nullptr && song_->wet;
+        const bool picked = ((filterHeld_ | filterLatchBits_) & mainMask_) != 0 && song_ != nullptr && song_->wet;
         if (masterFilter.load(std::memory_order_relaxed))
         {
             route = static_cast<int>(picked ? FilterRoute::Channels : FilterRoute::Master);
@@ -1056,16 +1170,38 @@ void Player::process(const platform::AudioIO& io) noexcept
     const float gain = std::pow(10.0f, gainDb.load(std::memory_order_relaxed) / 20.0f) * volume * volume;
     float peakL = 0, peakR = 0;
 
+    // The single outs: OUT 3-4, 5-6, 7-8 (jack j on port 1 + j / 2, left for even j). Gain and the strip's volume act on
+    // them, MAIN VOLUME does not (direct outs).
+    float* jackOut[outs::kJacks] {};
+    bool anyJack = false;
+    for (int j = 0; j < outs::kJacks; ++j)
+    {
+        const int port = 1 + j / 2;
+        jackOut[j] = port < io.numOutPorts ? io.out[2 * port + (j & 1)] : nullptr;
+        anyJack = anyJack || jackOut[j] != nullptr;
+    }
+    const float jackGain = std::pow(10.0f, gainDb.load(std::memory_order_relaxed) / 20.0f);
+    const int nOut = song_ != nullptr ? static_cast<int>(song_->outs.size()) : 0;
+    std::array<float, outs::kJacks> jackPeak {};
+    // The identification beeps: per jack j, j + 1 beeps of kBeep frames with kBeep gaps, then a pause.
+    if (identArm_.exchange(false, std::memory_order_acq_rel))
+        identT_ = 0, identOn_ = true;
+    const int kBeep = static_cast<int>(0.12 * sampleRate_), kIdentPause = static_cast<int>(0.8 * sampleRate_);
+
     for (int done = 0; done < io.frames;)
     {
         const int n = std::min(kChunk, io.frames - done);
         float dl[kChunk] = {}, dr[kChunk] = {}, wl[kChunk] = {}, wr[kChunk] = {};
+        float ol[outs::kMaxStems][kChunk] = {}, orr[outs::kMaxStems][kChunk] = {};
         if (song_ != nullptr && playingNow_)
         {
-            song_->dry->read(static_cast<std::int32_t>(sampleRate_), static_cast<std::size_t>(n), dl, dr);
+            const auto rate = static_cast<std::int32_t>(sampleRate_);
+            song_->dry.m->read(rate, static_cast<std::size_t>(n), dl, dr);
             if (song_->wet)
-                song_->wet->read(static_cast<std::int32_t>(sampleRate_), static_cast<std::size_t>(n), wl, wr);
-            const int o = song_->dry->get_current_order(), r = song_->dry->get_current_row();
+                song_->wet.m->read(rate, static_cast<std::size_t>(n), wl, wr);
+            for (int k = 0; k < nOut; ++k) // every instance reads, used or not: they stay in lockstep
+                song_->outs[static_cast<std::size_t>(k)].m->read(rate, static_cast<std::size_t>(n), ol[k], orr[k]);
+            const int o = song_->dry.m->get_current_order(), r = song_->dry.m->get_current_row();
             if (o != order_ || r != row_)
                 onRow(o, r, frame_ + static_cast<std::uint64_t>(n));
             else if (! naturalValid_) // the first read after a seek started the row: now its next row is known
@@ -1077,6 +1213,15 @@ void Player::process(const platform::AudioIO& io) noexcept
                 reassertNext();
             clockChunk(frame_, frame_ + static_cast<std::uint64_t>(n));
         }
+        // The click (a decaying sine; onRow starts it on each beat, accented on the bar).
+        float ck[kChunk] = {};
+        if (clickLeft_ > 0)
+            for (int i = 0; i < n && clickLeft_ > 0; ++i, --clickLeft_)
+            {
+                ck[i] = clickAmp_ * std::sin(clickPhase_);
+                clickPhase_ += clickStep_;
+                clickAmp_ *= clickDecay_;
+            }
 
         float* ml = io.out[0] != nullptr ? io.out[0] + done : nullptr;
         float* mr = io.out[1] != nullptr ? io.out[1] + done : nullptr;
@@ -1103,8 +1248,24 @@ void Player::process(const platform::AudioIO& io) noexcept
 
         for (int i = 0; i < n; ++i)
         {
+            // Every stream, delayed by the loop's latency (with the loop; a latency change cross-fades the two taps),
+            // so a route change never shifts the song in time and the single outs stay aligned with MAIN.
+            const int w = delayWrite_, rd = (w - delayNow_ + kMaxDelay) % kMaxDelay, rp = (w - delayPrev_ + kMaxDelay) % kMaxDelay;
+            const float kf = loop && fadeDelay_ > 0 ? static_cast<float>(fadeDelay_) / kFade : 0.0f;
+            auto lane = [&](int which, float x) -> float {
+                if (! loop)
+                    return x;
+                float* b = lanes_.data() + static_cast<std::size_t>(which) * kMaxDelay;
+                b[w] = x;
+                const float y = b[rd];
+                return kf > 0 ? y * (1 - kf) + b[rp] * kf : y;
+            };
+            const float ddl = lane(kLaneDryL, dl[i]), ddr = lane(kLaneDryR, dr[i]);
+            const float dwl = lane(kLaneWetL, wl[i]), dwr = lane(kLaneWetR, wr[i]);
+            const float click = lane(kLaneClick, ck[i]);
             float outL = 0, outR = 0;
             float dacPeak = 0; // the driven signal as the DAC that feeds the filter sees it (1 = full scale)
+            const float retL = rl[i], retR = rr[i];
             if (loop)
             {
                 const std::uint64_t now = frame_ + static_cast<std::uint64_t>(i);
@@ -1116,28 +1277,6 @@ void Player::process(const platform::AudioIO& io) noexcept
                     routeHead_ = (routeHead_ + 1) % static_cast<int>(routeQueue_.size());
                     --routeCount_;
                 }
-                // The direct path, delayed by the loop's latency (a latency change cross-fades the two taps).
-                // Both stems, delayed by the loop's latency in every route, so a route change never shifts the song in
-                // time (a latency change cross-fades the two taps).
-                const int w = delayWrite_;
-                const auto at = [](int i) { return static_cast<std::size_t>(i); };
-                delayL_[at(w)] = dl[i];
-                delayR_[at(w)] = dr[i];
-                delayWL_[at(w)] = wl[i];
-                delayWR_[at(w)] = wr[i];
-                const int rd = (w - delayNow_ + kMaxDelay) % kMaxDelay;
-                float ddl = delayL_[at(rd)], ddr = delayR_[at(rd)], dwl = delayWL_[at(rd)], dwr = delayWR_[at(rd)];
-                if (fadeDelay_ > 0)
-                {
-                    const int rp = (w - delayPrev_ + kMaxDelay) % kMaxDelay;
-                    const float k = static_cast<float>(fadeDelay_--) / kFade;
-                    ddl = ddl * (1 - k) + delayL_[at(rp)] * k;
-                    ddr = ddr * (1 - k) + delayR_[at(rp)] * k;
-                    dwl = dwl * (1 - k) + delayWL_[at(rp)] * k;
-                    dwr = dwr * (1 - k) + delayWR_[at(rp)] * k;
-                }
-                delayWrite_ = (w + 1) % kMaxDelay;
-                const float retL = rl[i], retR = rr[i];
                 if (driveLeft_ > 0)
                     driveNow_ = --driveLeft_ == 0 ? driveTarget_ : driveNow_ + driveStep_;
                 // Off: the mix (the wet stem carries nothing). Channels: the dry stem plus the filter's return.
@@ -1188,8 +1327,8 @@ void Player::process(const platform::AudioIO& io) noexcept
             }
             else
             {
-                outL = dl[i] + wl[i];
-                outR = dr[i] + wr[i];
+                outL = ddl + dwl;
+                outR = ddr + dwr;
             }
             if (loop) // OVER: that peak, held 0.5 s
             {
@@ -1211,6 +1350,74 @@ void Player::process(const platform::AudioIO& io) noexcept
                 ml[i] = outL;
             if (mr != nullptr)
                 mr[i] = outR;
+
+            // The single outs: the out stems on their jacks (a mono jack gets ½ (L + R): libopenmpt pans linearly, so
+            // that is a channel's level at any pan), then the utility signals.
+            float jk[outs::kJacks] = {};
+            for (int k = 0; k < nOut; ++k)
+            {
+                const float a = lane(kLaneOut0 + 2 * k, ol[k][i]), b = lane(kLaneOut0 + 2 * k + 1, orr[k][i]);
+                const auto d = stemDest_[static_cast<std::size_t>(k)];
+                if (outs::isPair(d))
+                {
+                    jk[2 * outs::pairIndex(d)] += a;
+                    jk[2 * outs::pairIndex(d) + 1] += b;
+                }
+                else if (outs::isMono(d))
+                    jk[outs::monoJack(d)] += 0.5f * (a + b);
+            }
+            if (loop)
+                delayWrite_ = (w + 1) % kMaxDelay;
+            if (kf > 0)
+                --fadeDelay_;
+            if (anyJack)
+            {
+                for (int j = 0; j < outs::kJacks; ++j)
+                {
+                    const auto src = src_[static_cast<std::size_t>(j)];
+                    if (src == outs::Source::Channels)
+                        continue;
+                    float L = 0, R = 0;
+                    switch (src)
+                    {
+                    case outs::Source::Clean: L = ddl + dwl, R = ddr + dwr; break;
+                    case outs::Source::Return: L = retL, R = retR; break;
+                    case outs::Source::Click: L = R = click; break;
+                    default: break;
+                    }
+                    jk[j] = src_[static_cast<std::size_t>(j ^ 1)] == src ? ((j & 1) ? R : L) : 0.5f * (L + R);
+                }
+                float beep = 0;
+                int beepJack = -1;
+                if (identOn_)
+                {
+                    int t = identT_++, j = 0;
+                    while (j < outs::kJacks && t >= (j + 1) * 2 * kBeep + kIdentPause)
+                        t -= (j + 1) * 2 * kBeep + kIdentPause, ++j;
+                    if (j >= outs::kJacks)
+                        identOn_ = false;
+                    else
+                    {
+                        beepJack = j;
+                        if (t < (j + 1) * 2 * kBeep && t % (2 * kBeep) < kBeep)
+                        {
+                            const int u = t % (2 * kBeep);
+                            const float env = std::min({1.0f, static_cast<float>(u) / 200.0f, static_cast<float>(kBeep - u) / 200.0f});
+                            beep = 0.4f * env * std::sin(2.0f * 3.14159265f * 880.0f * static_cast<float>(u) / static_cast<float>(sampleRate_));
+                        }
+                    }
+                }
+                for (int j = 0; j < outs::kJacks; ++j)
+                {
+                    float v = softClip(jk[j] * jackGain * volumeNow_ * outputGain_) * ceiling;
+                    if (j == beepJack)
+                        v += beep;
+                    jackPeak[static_cast<std::size_t>(j)] = std::max(jackPeak[static_cast<std::size_t>(j)], std::fabs(v));
+                    if (jackOut[j] != nullptr)
+                        jackOut[j][done + i] = v;
+                }
+                identJackPub_.store(identOn_ ? beepJack : -1, std::memory_order_relaxed);
+            }
         }
         // PHONES: the same mix.
         constexpr int kPh = static_cast<int>(platform::AudioPort::Phones);
@@ -1223,12 +1430,8 @@ void Player::process(const platform::AudioIO& io) noexcept
         frame_ += static_cast<std::uint64_t>(n);
         done += n;
     }
-    // Ports nobody writes stay silent (the device zeroes them? not guaranteed): clear the extra jacks.
-    for (int p = 1; p < io.numOutPorts; ++p)
-        if (p != static_cast<int>(platform::AudioPort::Phones) && p != kSend)
-            for (int s = 0; s < 2; ++s)
-                if (io.out[2 * p + s] != nullptr)
-                    std::fill(io.out[2 * p + s], io.out[2 * p + s] + io.frames, 0.0f);
+    for (int j = 0; j < outs::kJacks; ++j)
+        raise(jackPeak_[static_cast<std::size_t>(j)], jackPeak[static_cast<std::size_t>(j)]);
 
     // Publish.
     playing_.store(playingNow_, std::memory_order_relaxed);
@@ -1242,14 +1445,20 @@ void Player::process(const platform::AudioIO& io) noexcept
     raise(peak_[1], peakR);
     if (song_ != nullptr)
     {
-        speed_.store(song_->dry->get_current_speed(), std::memory_order_relaxed);
-        bpm_.store(static_cast<float>(song_->dry->get_current_estimated_bpm()), std::memory_order_relaxed);
+        speed_.store(song_->dry.m->get_current_speed(), std::memory_order_relaxed);
+        bpm_.store(static_cast<float>(song_->dry.m->get_current_estimated_bpm()), std::memory_order_relaxed);
         const int n = std::min(data_->channels, kMaxChannels);
         for (int c = 0; c < n; ++c)
         {
-            float v = song_->dry->get_current_channel_vu_mono(c);
-            if (song_->wet)
-                v = std::max(v, song_->wet->get_current_channel_vu_mono(c));
+            float v = 0;
+            if (const int k = vuStem_[static_cast<std::size_t>(c)]; k >= 0 && k < nOut)
+                v = song_->outs[static_cast<std::size_t>(k)].m->get_current_channel_vu_mono(c);
+            else
+            {
+                v = song_->dry.m->get_current_channel_vu_mono(c);
+                if (song_->wet)
+                    v = std::max(v, song_->wet.m->get_current_channel_vu_mono(c));
+            }
             vu_[static_cast<std::size_t>(c)].store(playingNow_ ? v : 0.0f, std::memory_order_relaxed);
         }
         loopActive_.store(loopOn_, std::memory_order_relaxed);

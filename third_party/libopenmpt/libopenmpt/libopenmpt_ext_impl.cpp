@@ -395,6 +395,21 @@ namespace openmpt {
 		m_currentPositionSeconds = 0.0;
 	}
 
+	void module_ext_impl::set_channel_silent( std::int32_t channel, bool silent ) {
+		if ( channel < 0 || channel >= static_cast<std::int32_t>( OpenMPT::MAX_CHANNELS ) ) {
+			return;
+		}
+		m_sndFile->m_PlayState.Chn[channel].track16Silent = silent;
+		if ( channel >= get_num_channels() ) {
+			return; // a background voice (a play_note voice): only itself
+		}
+		for ( OpenMPT::CHANNELINDEX i = m_sndFile->GetNumChannels(); i < OpenMPT::MAX_CHANNELS; i++ ) {
+			if ( m_sndFile->m_PlayState.Chn[i].nMasterChn == channel + 1 ) {
+				m_sndFile->m_PlayState.Chn[i].track16Silent = silent;
+			}
+		}
+	}
+
 	/* add stuff here */
 
 

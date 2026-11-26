@@ -2,8 +2,13 @@
 // and the MIDI note output read (pattern cells, order list, names), so no thread but the audio thread ever calls into
 // libopenmpt while it plays.
 //
-// Stems: with the analog filter loop present the song has a second instance of the same module ("wet"). Both play in
-// lockstep with complementary channel masks; the wet one carries the channels that go through the filter.
+// Stems: the song plays as several instances of the same module, in lockstep, each with its own channel mute mask, so
+// that each channel is mixed once, in the instance whose output it belongs to. "dry" feeds MAIN; with the analog
+// filter loop, "wet" carries the channels that go through the filter; the "outs" pool carries channels sent to the
+// single outputs OUT 3–8 (one instance per destination in use, app/Outs.h). An instance leaves the channels it does
+// not carry out of its mix with the vendored libopenmpt's set_channel_silent, not with mutes: a silent channel plays
+// on in every other respect, so all instances stay identical and a channel can move between them mid-note. (A muted
+// channel stands still: its sample position, NNA voices and, in S3M, its effects.)
 //
 // Loading (loadSong) runs on the screen's loader thread; the Song is then handed to the audio thread (Player::load)
 // and handed back for deletion (Player::collect) on the message thread.
@@ -77,24 +82,47 @@ struct SongData
     }
 };
 
+// One libopenmpt instance and its extension interfaces.
+struct Stem
+{
+    std::unique_ptr<openmpt::module_ext> m;
+    openmpt::ext::interactive* i = nullptr;
+    openmpt::ext::interactive2* i2 = nullptr;
+    openmpt::ext::track16_position* p = nullptr; // seeks, silence (third_party/libopenmpt)
+    explicit operator bool() const noexcept { return m != nullptr; }
+    Stem();
+    Stem(Stem&&) noexcept;
+    Stem& operator=(Stem&&) noexcept;
+    ~Stem();
+};
+
 struct Song
 {
     std::shared_ptr<const SongData> data;
-    std::unique_ptr<openmpt::module_ext> dry, wet; // wet: only with stems
-    openmpt::ext::interactive* dryI = nullptr;
-    openmpt::ext::interactive* wetI = nullptr;
-    openmpt::ext::interactive2* dryI2 = nullptr;
-    openmpt::ext::track16_position* dryP = nullptr; // seeks without libopenmpt's simulation (third_party/libopenmpt)
-    openmpt::ext::track16_position* wetP = nullptr;
+    Stem dry, wet;          // wet: only with the filter loop
+    std::vector<Stem> outs; // the single outputs' pool
     bool playOnAdopt = false; // the player starts it when it takes it over
     Song();
     ~Song();
+    template <typename F>
+    void each(F&& f) // every instance (they all move together)
+    {
+        f(dry);
+        if (wet)
+            f(wet);
+        for (auto& s : outs)
+            f(s);
+    }
+    int instances() const noexcept { return 1 + (wet ? 1 : 0) + static_cast<int>(outs.size()); }
 };
 
-// Reads and parses a module file (any thread but the audio thread). `stems`: create the second ("wet") instance as
-// well. `sampleRate`: the mixer is set up for it here, so the audio thread's first read does no setup work.
+// Reads and parses a module file (any thread but the audio thread). `stems`: create the filter's "wet" instance as
+// well; `outStems`: that many instances for the single outputs (0–6). `sampleRate`: the mixer is set up for it here,
+// so the audio thread's first read does no setup work. Every instance but "dry" starts with all channels silent
+// (track16_position::set_channel_silent: they play on, unmixed).
 // Null + error on failure.
-std::unique_ptr<Song> loadSong(const std::string& path, bool stems, int sampleRate, int stereoSeparation, int interpolation, std::string& error);
+std::unique_ptr<Song> loadSong(const std::string& path, bool stems, int outStems, int sampleRate, int stereoSeparation, int interpolation,
+                               std::string& error);
 
 // True for file names libopenmpt is likely to play (by extension; the loader decides).
 bool looksLikeModule(const std::string& fileName);

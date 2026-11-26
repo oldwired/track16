@@ -433,6 +433,9 @@ class track16_position {
 	//! Back to order 0, row 0 with the module's initial speed, tempo and global volume; all voices reset.
 	virtual void rewind() = 0;
 
+	//! Leave a channel (and its background voices) out of the mix while everything else about it plays on: unlike a mute, its sample positions, envelopes, effects and voice allocation stay exactly as if it were heard, so another instance of the same module can carry it and both stay in lockstep. A channel index past the pattern channels (as play_note returns) silences only that voice.
+	virtual void set_channel_silent( std::int32_t channel, bool silent ) = 0;
+
 }; // class track16_position
 
 

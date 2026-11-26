@@ -443,7 +443,8 @@ bool CSoundFile::MixChannel(int count, ModChannel &chn, CHANNELINDEX channel, bo
 
 			// Should we mix this channel?
 			if(!doMix                                                   // Too many channels
-			   || (!chn.nRampLength && !(chn.leftVol | chn.rightVol)))  // Channel is completely silent
+			   || (!chn.nRampLength && !(chn.leftVol | chn.rightVol))   // Channel is completely silent
+			   || chn.track16Silent)                                   // Track16 (not upstream): left out of this instance's mix
 			{
 				chn.position += chn.increment * nSmpCount;
 				chn.nROfs = chn.nLOfs = 0;

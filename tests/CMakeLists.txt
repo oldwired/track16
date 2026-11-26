@@ -11,7 +11,7 @@ find_package(Threads REQUIRED)
 include(${CMAKE_CURRENT_LIST_DIR}/../cmake/libopenmpt.cmake)
 
 set(ROOT ${CMAKE_CURRENT_LIST_DIR}/..)
-add_executable(player_test player_test.cpp LogStub.cpp ${ROOT}/app/Player.cpp ${ROOT}/app/Song.cpp ${ROOT}/app/Library.cpp)
+add_executable(player_test player_test.cpp LogStub.cpp ${ROOT}/app/Player.cpp ${ROOT}/app/Song.cpp ${ROOT}/app/Library.cpp ${ROOT}/app/Outs.cpp)
 target_include_directories(player_test PRIVATE ${ROOT} ${ROOT}/hw)
 target_link_libraries(player_test PRIVATE openmpt Threads::Threads)
 target_compile_options(player_test PRIVATE -Wall -Wextra)

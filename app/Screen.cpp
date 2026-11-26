@@ -6,12 +6,14 @@
 #include "ProjectIdentity.h"
 #include "controls/ControlNames.h"
 
+#include <sys/stat.h>
 #include <time.h>
 
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <fstream>
 
 namespace app
 {
@@ -359,6 +361,147 @@ struct Screen::KnobStrip final : juce::Component
     }
 };
 
+// ---- the OUTS page --------------------------------------------------------------------------------------------------
+// In the OUTS pad mode the body shows where the pads' 16 channels play: MAIN, the jacks OUT 3–8 (a stereo pair as one
+// bar over both jacks), +MAIN; above each jack what it carries (tap: CH → CLEAN → RETURN → CLICK) and its level.
+
+namespace
+{
+constexpr std::uint32_t kGroupRgb[3] = {0x4C7DFF, 0x3CDC78, 0xFFB020}; // 3-4 blue, 5-6 green, 7-8 amber (the pads' colours)
+juce::Colour groupColour(int group, float alpha = 1.0f) { return juce::Colour(0xFF000000 | kGroupRgb[group % 3]).withAlpha(alpha); }
+} // namespace
+
+struct Screen::OutsPage final : juce::Component
+{
+    static constexpr float kHeadH = 40, kJackY = 44, kJackH = 60, kRowY = 112, kRowH = 22;
+    static constexpr float kNameX = 16, kMainX = 312, kColW = 104, kAlsoX = 1168, kAlsoW = 96;
+    static float jackX(int j) { return 440 + 112 * static_cast<float>(j) + 20 * static_cast<float>(j / 2); }
+
+    const outs::Layout* layout = nullptr;
+    std::shared_ptr<const SongData> song;
+    int page = 0, stemsUsed = 0, stemsTotal = 0, identJack = -1;
+    std::uint16_t unserved = 0;
+    std::uint64_t muted = 0, held = 0;
+    std::array<float, outs::kJacks> level {};
+
+    // A tap: the row (channel on this page, −1 = none) and the column (−1 MAIN, 0–5 a jack, 6 +MAIN, −2 none);
+    // jackSource: a tap on a jack's header (−1 = none).
+    void hit(juce::Point<float> p, int& row, int& column, int& jackSource) const
+    {
+        row = -1, column = -2, jackSource = -1;
+        for (int j = 0; j < outs::kJacks; ++j)
+            if (p.x >= jackX(j) && p.x < jackX(j) + kColW)
+            {
+                column = j;
+                if (p.y >= kJackY && p.y < kJackY + kJackH)
+                    jackSource = j;
+            }
+        if (p.x >= kMainX && p.x < kMainX + kColW + 16)
+            column = -1;
+        if (p.x >= kAlsoX && p.x < kAlsoX + kAlsoW)
+            column = 6;
+        if (p.y >= kRowY && p.y < kRowY + 16 * kRowH)
+            row = static_cast<int>((p.y - kRowY) / kRowH);
+    }
+    void paint(juce::Graphics& g) override
+    {
+        g.fillAll(c::bg);
+        const float w = static_cast<float>(getWidth());
+        theme::text(g, 16, kHeadH / 2, Align::Left, Text::Label, c::text1, "OUTS");
+        juce::String pool = "INSTANCES " + juce::String(stemsUsed) + "/" + juce::String(stemsTotal);
+        if (unserved != 0)
+            pool += "  " + kDot + "  POOL FULL: " + juce::String(__builtin_popcount(unserved)) + " NOT ROUTED (out_stems)";
+        theme::text(g, 92, kHeadH / 2, Align::Left, Text::Caption, unserved != 0 ? c::warn : c::text2, pool);
+        theme::text(g, w - 16, kHeadH / 2, Align::Right, Text::Caption, c::text3,
+                    "HOLD PADS + STEP 1 MAIN / 3-8 JACK (TWO KEYS: PAIR)  " + kDot + "  SHIFT+PAD: +MAIN  " + kDot + "  STEP ALONE: SOURCE");
+        if (layout == nullptr)
+            return;
+        // The jacks: name, source, level.
+        theme::text(g, kMainX + kColW / 2, kJackY + 16, Align::Centre, Text::Caption, c::text2, "MAIN");
+        theme::text(g, kAlsoX + kAlsoW / 2, kJackY + 16, Align::Centre, Text::Caption, c::text2, "+MAIN");
+        for (int j = 0; j < outs::kJacks; ++j)
+        {
+            const float x = jackX(j);
+            const auto src = layout->source[static_cast<std::size_t>(j)];
+            const bool ident = identJack == j;
+            g.setColour(ident ? c::accentWeak : c::surface2);
+            g.fillRoundedRectangle(x, kJackY, kColW, kJackH, theme::radiusM);
+            theme::text(g, x + kColW / 2, kJackY + 16, Align::Centre, Text::Caption, ident ? c::accent : c::text2,
+                        "OUT " + juce::String(j + 3));
+            theme::text(g, x + kColW / 2, kJackY + 38, Align::Centre, Text::BodyStrong,
+                        src == outs::Source::Channels ? groupColour(j / 2) : c::text1, outs::sourceName(src));
+            const float lv = std::clamp(std::sqrt(level[static_cast<std::size_t>(j)]), 0.0f, 1.0f);
+            g.setColour(c::borderStrong);
+            g.fillRoundedRectangle(x + 12, kJackY + kJackH - 8, kColW - 24, 3, 1.5f);
+            g.setColour(lv > 0.95f ? c::warn : c::text1);
+            g.fillRoundedRectangle(x + 12, kJackY + kJackH - 8, (kColW - 24) * lv, 3, 1.5f);
+        }
+        if (! song)
+            return;
+        const int channels = std::min(song->channels, kMaxChannels);
+        for (int r = 0; r < 16; ++r)
+        {
+            const int ch = page * 16 + r;
+            if (ch >= channels)
+                break;
+            const float y = kRowY + kRowH * static_cast<float>(r), cy = y + kRowH / 2;
+            const bool isHeld = (held >> r) & 1;
+            if (isHeld || r % 2 == 1)
+            {
+                g.setColour(isHeld ? c::accentWeak : c::surface1);
+                g.fillRoundedRectangle(8, y + 1, w - 16, kRowH - 2, theme::radiusS);
+            }
+            const auto d = layout->dest[static_cast<std::size_t>(ch)];
+            const bool also = (layout->alsoMain >> ch) & 1;
+            const bool isMuted = (muted >> ch) & 1;
+            juce::String name = juce::String(ch + 1).paddedLeft('0', 2);
+            if (ch < static_cast<int>(song->channelNames.size()) && ! song->channelNames[static_cast<std::size_t>(ch)].empty())
+                name += "  " + juce::String::fromUTF8(song->channelNames[static_cast<std::size_t>(ch)].c_str());
+            theme::text(g, kNameX + 8, cy, Align::Left, Text::Caption, isMuted ? c::text3 : theme::track(r + 1), name);
+            // MAIN
+            if (d == outs::kMain || also)
+            {
+                g.setColour(c::text1.withAlpha(isMuted ? 0.3f : 0.85f));
+                g.fillRoundedRectangle(kMainX + 8, y + 5, kColW - 16, kRowH - 10, 4);
+            }
+            else
+            {
+                g.setColour(c::borderStrong);
+                g.drawRoundedRectangle(kMainX + 8, y + 5, kColW - 16, kRowH - 10, 4, 1);
+            }
+            // The jacks: a free cell outlined, the destination filled (a pair as one bar); a jack with a utility
+            // signal takes no channels (dimmed); not routed (pool full) in the warning colour.
+            for (int j = 0; j < outs::kJacks; ++j)
+                if (layout->source[static_cast<std::size_t>(j)] == outs::Source::Channels && ! (outs::jackMask(d) & (1u << j)))
+                {
+                    g.setColour(c::border);
+                    g.drawRoundedRectangle(jackX(j) + 8, y + 5, kColW - 16, kRowH - 10, 4, 1);
+                }
+            if (d != outs::kMain)
+            {
+                const unsigned m = outs::jackMask(d);
+                const int j0 = __builtin_ctz(m), j1 = 31 - __builtin_clz(m);
+                const float x0 = jackX(j0) + 8, x1 = jackX(j1) + kColW - 8;
+                const bool notRouted = (unserved >> d) & 1;
+                const auto ink = notRouted ? c::warn : groupColour(outs::group(d), isMuted ? 0.3f : 0.9f);
+                g.setColour(ink);
+                if (notRouted)
+                    g.drawRoundedRectangle(x0, y + 5, x1 - x0, kRowH - 10, 4, 2);
+                else
+                    g.fillRoundedRectangle(x0, y + 5, x1 - x0, kRowH - 10, 4);
+                if (outs::isPair(d))
+                    theme::text(g, (x0 + x1) / 2, cy, Align::Centre, Text::Caption, notRouted ? c::warn : c::bg, "STEREO");
+            }
+            // +MAIN
+            g.setColour(also ? c::text1 : c::border);
+            if (also)
+                g.fillEllipse(kAlsoX + kAlsoW / 2 - 6, cy - 6, 12, 12);
+            else if (d != outs::kMain)
+                g.drawEllipse(kAlsoX + kAlsoW / 2 - 6, cy - 6, 12, 12, 1);
+        }
+    }
+};
+
 // ---- the screen -----------------------------------------------------------------------------------------------------
 
 Screen::Screen(Player& player, Midi& midi, ScreenConfig config) : player_(player), midi_(midi), config_(std::move(config))
@@ -380,6 +523,9 @@ Screen::Screen(Player& player, Midi& midi, ScreenConfig config) : player_(player
     context_ = add(new ContextBar(), {0, L::contextY, theme::kCanvasW, L::contextH + 1});
     browser_ = add(new Browser(), kBody);
     knobs_ = add(new KnobStrip(), {0, L::stripY, theme::kCanvasW, L::stripH});
+    outsPage_ = add(new OutsPage(), kBody);
+    outsPage_->layout = &layout_;
+    outsPage_->setVisible(false);
     browser_->library = &library_;
     rects_.reserve(4096);
     overlay_.reserve(256);
@@ -399,6 +545,8 @@ Screen::~Screen()
     loadWake_.notify_all();
     if (loader_.joinable())
         loader_.join();
+    if (layoutDirty_)
+        saveLayout();
     canvas_->deleteAllChildren();
     setLookAndFeel(nullptr);
 }
@@ -437,7 +585,7 @@ void Screen::loadEntry(int index, bool play)
         return;
     {
         std::lock_guard<std::mutex> lock(loadMutex_);
-        loadJob_ = {index, list[static_cast<std::size_t>(index)].path, play, player_.stems(), player_.sampleRate()};
+        loadJob_ = {index, list[static_cast<std::size_t>(index)].path, play, player_.stems(), player_.sampleRate(), config_.outStems};
         loadWanted_ = true; // a newer request replaces one that has not started
     }
     loadWake_.notify_all();
@@ -459,8 +607,8 @@ void Screen::loaderThread()
         loadWanted_ = false;
         lock.unlock();
         const double t0 = nowMs();
-        result->song = loadSong(result->job.path, result->job.stems, result->job.sampleRate, config_.stereoSeparation,
-                                config_.interpolation, result->error);
+        result->song = loadSong(result->job.path, result->job.stems, result->job.outStems, result->job.sampleRate,
+                                config_.stereoSeparation, config_.interpolation, result->error);
         result->ms = nowMs() - t0;
         lock.lock();
         loaded_ = std::move(result); // replaces a result frame() has not taken yet (a newer pick wins)
@@ -484,9 +632,9 @@ void Screen::takeLoaded()
         return;
     }
     const auto& d = *r->song->data;
-    logLine("LOAD %s \"%s\" %s, %d ch, %d orders, %d patterns, %d instruments, %.0f s, stems=%d (%.0f ms)", d.path.c_str(),
-            d.title.c_str(), d.type.c_str(), d.channels, d.numOrders, d.numPatterns, std::max(d.numInstruments, d.numSamples),
-            d.durationSeconds, r->song->wet ? 1 : 0, r->ms);
+    logLine("LOAD %s \"%s\" %s, %d ch, %d orders, %d patterns, %d instruments, %.0f s, instances=%d (filter %d, outs %d) (%.0f ms)",
+            d.path.c_str(), d.title.c_str(), d.type.c_str(), d.channels, d.numOrders, d.numPatterns, std::max(d.numInstruments, d.numSamples),
+            d.durationSeconds, r->song->instances(), r->song->wet ? 1 : 0, static_cast<int>(r->song->outs.size()), r->ms);
     event("LOADED " + juce::String::fromUTF8(d.title.c_str()));
     r->song->playOnAdopt = r->job.play;
     pending_ = std::move(r->song); // replaces one the player has not taken yet
@@ -520,7 +668,7 @@ void Screen::setPadMode(PadMode mode, bool samePressed)
     }
     player_.padMode = static_cast<int>(mode);
     player_.page = 0;
-    static const char* const names[] = {"FILTER", "MUTE", "LOOP", "PLAY", "KIT"};
+    static const char* const names[] = {"FILTER", "MUTE", "LOOP", "PLAY", "KIT", "OUTS: HOLD PADS + STEP 1-8"};
     event(juce::String("PADS: ") + names[static_cast<int>(mode)]);
 }
 
@@ -564,7 +712,158 @@ void Screen::padPress(int pad0, int velocity, bool fromReader, double nowMs)
         if (song_ && index < static_cast<int>(song_->instrumentNames.size()))
             event("KIT " + juce::String(index + 1) + " " + juce::String::fromUTF8(song_->instrumentNames[static_cast<std::size_t>(index)].c_str()));
         break;
+    case PadMode::Outs:
+        if (! song_ || index >= std::min(song_->channels, kMaxChannels))
+            break;
+        if (shift_)
+        {
+            if (layout_.dest[static_cast<std::size_t>(index)] == outs::kMain)
+                event("CH " + juce::String(index + 1) + " IS ON MAIN: SEND IT TO A JACK FIRST (HOLD PAD + STEP 3-8)");
+            else
+            {
+                layout_.alsoMain ^= bit(index);
+                changeLayout("CH " + juce::String(index + 1) + ((layout_.alsoMain & bit(index)) ? " ALSO ON MAIN" : " OFF MAIN"), nowMs);
+            }
+        }
+        else
+            event("CH " + juce::String(index + 1) + " ON " + juce::String(outs::destName(layout_.dest[static_cast<std::size_t>(index)]))
+                  + ((layout_.alsoMain & bit(index)) ? " +MAIN" : "") + kDot + " STEP 1 MAIN, 3-8 JACK, TWO KEYS = PAIR");
+        break;
     }
+}
+
+// ---- the single outs ----
+
+bool Screen::outsVisible() const { return view_ == View::Player && static_cast<PadMode>(player_.padMode.load()) == PadMode::Outs; }
+
+// The module's own layout (<dataDir>/outs/<file name>.txt), or the default one.
+void Screen::loadLayout()
+{
+    layoutFile_.clear();
+    layout_ = outs::parse(config_.outsDefault);
+    if (song_ && ! config_.dataDir.empty())
+    {
+        std::string name = song_->fileName;
+        for (char& ch : name)
+            if (ch == '/' || ch == '\\' || static_cast<unsigned char>(ch) < 32)
+                ch = '_';
+        layoutFile_ = config_.dataDir + "/outs/" + name + ".txt";
+        if (std::ifstream in(layoutFile_); in)
+        {
+            std::string line, all;
+            while (std::getline(in, line))
+                if (! line.empty() && line[0] != '#')
+                    all += line + " ";
+            layout_ = outs::parse(all);
+            logLine("OUTS %s: %s", layoutFile_.c_str(), outs::format(layout_).c_str());
+        }
+    }
+    layoutDirty_ = false;
+    player_.setOuts(layout_);
+}
+
+void Screen::saveLayout()
+{
+    layoutDirty_ = false;
+    if (layoutFile_.empty())
+        return;
+    ::mkdir(config_.dataDir.c_str(), 0755);
+    ::mkdir((config_.dataDir + "/outs").c_str(), 0755);
+    std::ofstream out(layoutFile_, std::ios::trunc);
+    out << "# Track16 single outs (" << (song_ ? song_->fileName : std::string()) << "), see the README\n" << outs::format(layout_) << "\n";
+    if (! out)
+        logLine("OUTS cannot write %s", layoutFile_.c_str());
+}
+
+void Screen::changeLayout(const juce::String& what, double nowMs)
+{
+    player_.setOuts(layout_);
+    layoutDirty_ = true;
+    layoutSaveMs_ = nowMs + 1500; // written once the edits pause
+    event(what);
+}
+
+void Screen::setChannelDest(int channel, std::uint8_t dest)
+{
+    if (channel < 0 || channel >= kMaxChannels)
+        return;
+    layout_.dest[static_cast<std::size_t>(channel)] = dest;
+    if (dest == outs::kMain)
+        layout_.alsoMain &= ~bit(channel);
+}
+
+// STEP keys in the OUTS pad mode. With pads held: their channels to MAIN (STEP 1–2) or a jack (STEP 3–8; with the pair's
+// other STEP key held as well: the pair). Alone: STEP 3–8 cycle what the jack carries; SHIFT + STEP 1: the jack beeps.
+void Screen::outsStep(int s, double nowMs)
+{
+    const std::uint64_t pads = padsHeld_ & 0xFFFF;
+    if (pads != 0 && song_)
+    {
+        if (s > 7)
+            return;
+        const int j = s - 2;
+        const std::uint8_t dest = s < 2 ? outs::kMain : outs::stepJack(j, (stepsHeld_ >> ((j ^ 1) + 2)) & 1);
+        int count = 0;
+        for (int p = 0; p < 16; ++p)
+            if ((pads >> p) & 1)
+            {
+                const int ch = player_.page.load() * 16 + p;
+                if (ch < std::min(song_->channels, kMaxChannels))
+                    setChannelDest(ch, dest), ++count;
+            }
+        if (count > 0)
+            changeLayout(juce::String(count) + (count == 1 ? " CHANNEL" : " CHANNELS") + " TO "
+                             + (dest == outs::kMain ? juce::String("MAIN") : "OUT " + juce::String(outs::destName(dest))),
+                         nowMs);
+        return;
+    }
+    if (s == 0 && shift_)
+    {
+        player_.identJacks();
+        event("OUTS IDENT: 1 BEEP ON OUT 3, 2 ON OUT 4 ... 6 ON OUT 8");
+        logLine("OUTS ident started");
+        return;
+    }
+    if (s >= 2 && s <= 7)
+    {
+        auto& src = layout_.source[static_cast<std::size_t>(s - 2)];
+        src = outs::nextSource(src);
+        changeLayout("OUT " + juce::String(s + 1) + ": " + outs::sourceLongName(src), nowMs);
+    }
+}
+
+void Screen::outsTouch(juce::Point<float> at, double nowMs)
+{
+    int row = -1, column = -2, jackSource = -1;
+    outsPage_->hit(at - kBody.getPosition(), row, column, jackSource);
+    if (jackSource >= 0)
+    {
+        auto& src = layout_.source[static_cast<std::size_t>(jackSource)];
+        src = outs::nextSource(src);
+        changeLayout("OUT " + juce::String(jackSource + 3) + ": " + outs::sourceLongName(src), nowMs);
+        return;
+    }
+    const int ch = player_.page.load() * 16 + row;
+    if (row < 0 || ! song_ || ch >= std::min(song_->channels, kMaxChannels))
+        return;
+    auto& d = layout_.dest[static_cast<std::size_t>(ch)];
+    if (column == -1)
+        setChannelDest(ch, outs::kMain);
+    else if (column >= 0 && column < outs::kJacks)
+    {
+        if (layout_.source[static_cast<std::size_t>(column)] != outs::Source::Channels)
+        {
+            event("OUT " + juce::String(column + 3) + " CARRIES " + outs::sourceLongName(layout_.source[static_cast<std::size_t>(column)])
+                  + ": TAP ITS NAME FOR CHANNELS");
+            return;
+        }
+        setChannelDest(ch, outs::tapJack(d, column));
+    }
+    else if (column == 6 && d != outs::kMain)
+        layout_.alsoMain ^= bit(ch);
+    else
+        return;
+    changeLayout("CH " + juce::String(ch + 1) + " ON " + juce::String(outs::destName(d)) + ((layout_.alsoMain & bit(ch)) ? " +MAIN" : ""), nowMs);
 }
 
 void Screen::padRelease(int pad0, double)
@@ -622,9 +921,15 @@ bool Screen::handle(const io::ControlEvent& e, double nowMs)
         {
             if (L::slotA.contains(at))
                 setView(view_ == View::Player ? View::Library : View::Player);
+            const auto now = static_cast<PadMode>(player_.padMode.load());
             for (int i = 0; i < 4; ++i)
                 if (L::menuButton(i).contains(at))
-                    setPadMode(i == 3 && static_cast<PadMode>(player_.padMode.load()) == PadMode::Play ? PadMode::Kit : static_cast<PadMode>(i), false);
+                    setPadMode(i == 3 && now == PadMode::Play ? PadMode::Kit
+                               : i == 0 && now == PadMode::Filter ? PadMode::Outs
+                                                                  : static_cast<PadMode>(i),
+                               false);
+            if (outsVisible() && kBody.contains(at))
+                outsTouch(at, nowMs);
             if (view_ == View::Library && kBody.contains(at))
             {
                 const int row = browser_->rowAt(at - kBody.getPosition());
@@ -676,6 +981,16 @@ bool Screen::handle(const io::ControlEvent& e, double nowMs)
                   + (i < static_cast<int>(song_->instrumentNames.size()) ? juce::String::fromUTF8(song_->instrumentNames[static_cast<std::size_t>(i)].c_str()) : juce::String()));
         }
         return true;
+    }
+    if (io::isStep(e.control) && (e.kind == K::Press || e.kind == K::Release))
+    {
+        const std::uint32_t b = 1u << (io::indexOf(e.control) - 1);
+        stepsHeld_ = e.kind == K::Press ? (stepsHeld_ | b) : (stepsHeld_ & ~b);
+        if (e.kind == K::Press && static_cast<PadMode>(player_.padMode.load()) == PadMode::Outs)
+        {
+            outsStep(io::indexOf(e.control) - 1, nowMs);
+            return true;
+        }
     }
     if (e.kind == K::Release && e.control == C::Back)
         return true;
@@ -747,7 +1062,7 @@ bool Screen::handle(const io::ControlEvent& e, double nowMs)
         }
         break;
     }
-    case C::PadModeTrack: setPadMode(PadMode::Filter, true); break;
+    case C::PadModeTrack: setPadMode(shift_ ? PadMode::Outs : PadMode::Filter, true); break;
     case C::PadModeMute: setPadMode(PadMode::Mute, true); break;
     case C::PadModeSlice: setPadMode(PadMode::Loop, true); break;
     case C::PadModeScale: setPadMode(shift_ ? PadMode::Kit : PadMode::Play, true); break;
@@ -831,7 +1146,10 @@ void Screen::frame(double nowMs, float fps)
         std::shared_ptr<const SongData> data = pending_->data;
         if (player_.load(std::move(pending_))) // the player starts it itself when it should play (Song::playOnAdopt)
         {
+            if (layoutDirty_)
+                saveLayout(); // the last module's
             song_ = std::move(data);
+            loadLayout();
             context_->set(context_->title, juce::String::fromUTF8(song_->title.c_str()));
             char info[160];
             std::snprintf(info, sizeof info, "%s · %d CH · %d ORD · %d:%02d", juce::String(song_->type).toUpperCase().toRawUTF8(),
@@ -841,6 +1159,45 @@ void Screen::frame(double nowMs, float fps)
         }
     }
     knobs_->frame(nowMs);
+
+    // The OUTS page instead of the rain in the OUTS pad mode; the layout is written once the edits pause.
+    {
+        const bool outsOn = outsVisible();
+        if (outsPage_->isVisible() != outsOn || canvas_->rainHole != (view_ == View::Player && ! outsOn))
+        {
+            outsPage_->setVisible(outsOn);
+            canvas_->rainHole = view_ == View::Player && ! outsOn;
+            canvas_->repaint();
+        }
+        if (layoutDirty_ && nowMs >= layoutSaveMs_)
+            saveLayout();
+        auto& p = *outsPage_;
+        bool changed = false;
+        changed |= assign(p.song, song_);
+        changed |= assign(p.page, player_.page.load());
+        changed |= assign(p.stemsUsed, player_.outStemsUsed());
+        changed |= assign(p.stemsTotal, player_.outStemsTotal());
+        changed |= assign(p.unserved, player_.outsUnserved());
+        changed |= assign(p.identJack, player_.identJack());
+        changed |= assign(p.muted, player_.muteMask.load() | (player_.soloMask.load() != 0 ? ~player_.soloMask.load() : 0ull));
+        changed |= assign(p.held, padsHeld_ & 0xFFFF);
+        changed |= assign(outsShown_, layout_);
+        if (static_cast<long>(nowMs / 66.0) != static_cast<long>(outsMeterMs_ / 66.0)) // the meters at 15 Hz
+        {
+            outsMeterMs_ = nowMs;
+            for (int j = 0; j < outs::kJacks; ++j)
+            {
+                const float v = player_.takeJackPeak(j);
+                auto& l = p.level[static_cast<std::size_t>(j)];
+                const float next = std::max(v, l * 0.7f);
+                if (std::fabs(next - l) > 0.01f)
+                    changed = true;
+                l = next;
+            }
+        }
+        if (changed && outsOn)
+            p.repaint();
+    }
 
     // Status row.
     const bool halfSecond = static_cast<long>(nowMs / 500.0) != static_cast<long>((nowMs - 17) / 500.0);
@@ -883,8 +1240,8 @@ void Screen::frame(double nowMs, float fps)
         context_->set(context_->info, juce::String("PUSH SELECT IN THE LIBRARY"));
     }
     const auto mode = static_cast<PadMode>(player_.padMode.load());
-    context_->set(context_->mode, std::min(static_cast<int>(mode), 3));
-    std::array<juce::String, 4> names {"FILTER", "MUTE", "LOOP", mode == PadMode::Kit ? "KIT" : "PLAY"};
+    context_->set(context_->mode, mode == PadMode::Outs ? 0 : std::min(static_cast<int>(mode), 3));
+    std::array<juce::String, 4> names {mode == PadMode::Outs ? "OUTS" : "FILTER", "MUTE", "LOOP", mode == PadMode::Kit ? "KIT" : "PLAY"};
     std::array<juce::String, 4> subs;
     const juce::String pageText = "PAGE " + juce::String(player_.page.load() + 1) + "/" + juce::String(pageCount());
     const int filtered = __builtin_popcountll(player_.filterChannels());
@@ -893,8 +1250,18 @@ void Screen::frame(double nowMs, float fps)
     subs[2] = player_.loopActive() ? juce::String(player_.loopLength()) + " ROWS" + (player_.loopLatched() ? " HOLD" : "")
                                    : (player_.patternLoop.load() ? juce::String("PATTERN") : juce::String("OFF"));
     subs[3] = mode == PadMode::Kit ? pageText : "INST " + juce::String(player_.instrument.load() + 1);
-    if (mode == PadMode::Filter || mode == PadMode::Mute)
-        subs[static_cast<std::size_t>(mode)] = subs[static_cast<std::size_t>(mode)] + " " + kDot + " P" + juce::String(player_.page.load() + 1);
+    if (mode == PadMode::Outs)
+    {
+        int routed = 0;
+        for (int c = 0; c < (song_ ? std::min(song_->channels, kMaxChannels) : 0); ++c)
+            routed += layout_.dest[static_cast<std::size_t>(c)] != outs::kMain ? 1 : 0;
+        subs[0] = player_.outsUnserved() != 0 ? juce::String("POOL FULL") : juce::String(routed) + " CH OUT";
+    }
+    if (mode == PadMode::Filter || mode == PadMode::Mute || mode == PadMode::Outs)
+    {
+        const std::size_t i = mode == PadMode::Outs ? 0 : static_cast<std::size_t>(mode);
+        subs[i] = subs[i] + " " + kDot + " P" + juce::String(player_.page.load() + 1);
+    }
     for (int i = 0; i < 4; ++i)
     {
         context_->set(context_->modeName[static_cast<std::size_t>(i)], names[static_cast<std::size_t>(i)]);
@@ -958,7 +1325,7 @@ void Screen::buildRain(double)
     const float colW = columnW(density);
     const int visible = std::max(1, static_cast<int>(kRainW / colW));
     const auto mode = static_cast<PadMode>(player_.padMode.load());
-    const int padFirst = (mode == PadMode::Filter || mode == PadMode::Mute) ? player_.page.load() * 16 : 0;
+    const int padFirst = (mode == PadMode::Filter || mode == PadMode::Mute || mode == PadMode::Outs) ? player_.page.load() * 16 : 0;
     int first = 0;
     if (d.channels > visible)
         first = std::clamp(padFirst, 0, d.channels - visible);
@@ -1191,13 +1558,70 @@ void Screen::lamps(io::LampFrame& f, double) const
             if (index < instruments)
                 s = down ? LampState {LampMode::Flash, led, padHitMs_[static_cast<std::size_t>(i)]} : LampState {LampMode::Dim, led, 0};
             break;
+        case PadMode::Outs:
+            // MAIN: faint in the channel's colour; a pair lit, a single jack dim, in the jack group's colour; +MAIN
+            // blinks; not routed (pool full) blinks red; held: white.
+            if (index < channels && index < kMaxChannels)
+            {
+                const auto d = layout_.dest[static_cast<std::size_t>(index)];
+                if (down)
+                    s = {LampMode::On, io::lampcolour::white, 0};
+                else if (d == outs::kMain)
+                    s = {LampMode::Faint, led, 0};
+                else if ((player_.outsUnserved() >> d) & 1)
+                    s = {LampMode::BlinkFast, io::lampcolour::red, 0};
+                else
+                {
+                    static constexpr std::uint32_t groups[3] = {io::lampcolour::blue, io::lampcolour::green, io::lampcolour::amber};
+                    const bool also = (layout_.alsoMain >> index) & 1;
+                    s = {also ? LampMode::BlinkSlow : outs::isPair(d) ? LampMode::On : LampMode::Dim, groups[outs::group(d)], 0};
+                }
+            }
+            break;
         }
         f[io::pad(i + 1)] = s;
     }
-    // Step keys: the order page; the playing order white, a queued one blinking, the others dim.
+    // Step keys: the order page; the playing order white, a queued one blinking, the others dim. In the OUTS pad mode:
+    // STEP 1-2 MAIN, 3-8 the jacks (lit: where the held pad's channel goes; otherwise what each jack carries).
     const auto pos = player_.position();
     const int queued = player_.queuedOrder();
-    for (int i = 0; i < 16; ++i)
+    if (mode == PadMode::Outs)
+    {
+        static constexpr std::uint32_t groups[3] = {io::lampcolour::blue, io::lampcolour::green, io::lampcolour::amber};
+        int heldChannel = -1;
+        for (int i = 0; i < 16 && heldChannel < 0; ++i)
+            if ((padsHeld_ >> i) & 1)
+                heldChannel = page * 16 + i;
+        const bool showHeld = heldChannel >= 0 && heldChannel < std::min(channels, kMaxChannels);
+        const auto d = showHeld ? layout_.dest[static_cast<std::size_t>(heldChannel)] : outs::kMain;
+        const bool onMain = showHeld && (d == outs::kMain || ((layout_.alsoMain >> heldChannel) & 1));
+        std::uint32_t usedJacks = 0;
+        for (int c = 0; c < std::min(channels, kMaxChannels); ++c)
+            usedJacks |= outs::jackMask(layout_.dest[static_cast<std::size_t>(c)]);
+        for (int i = 0; i < 16; ++i)
+        {
+            LampState s {};
+            if (i < 2)
+                s = showHeld ? (onMain ? LampState {LampMode::On, io::lampcolour::white, 0} : LampState {})
+                             : LampState {LampMode::Dim, io::lampcolour::white, 0};
+            else if (i < 8)
+            {
+                const int j = i - 2;
+                const auto src = layout_.source[static_cast<std::size_t>(j)];
+                if (player_.identJack() == j)
+                    s = {LampMode::BlinkFast, io::lampcolour::white, 0};
+                else if (showHeld)
+                    s = (outs::jackMask(d) >> j) & 1 ? LampState {LampMode::On, groups[j / 2], 0} : LampState {};
+                else if (src == outs::Source::Channels)
+                    s = {(usedJacks >> j) & 1 ? LampMode::On : LampMode::Faint, groups[j / 2], 0};
+                else
+                    s = {src == outs::Source::Click ? LampMode::BlinkSlow : LampMode::Dim,
+                         src == outs::Source::Return ? io::lampcolour::red : io::lampcolour::white, 0};
+            }
+            f[io::step(i + 1)] = s;
+        }
+    }
+    for (int i = 0; i < 16 && mode != PadMode::Outs; ++i)
     {
         const int order = orderPage_ * 16 + i;
         LampState s {};
@@ -1216,10 +1640,11 @@ void Screen::lamps(io::LampFrame& f, double) const
     f[C::Stop] = {};
     f[C::Rec] = player_.midiNotes.load() ? LampState {LampMode::On, io::lampcolour::red, 0} : LampState {};
     const C modes[] = {C::PadModeTrack, C::PadModeMute, C::PadModeSlice, C::PadModeScale};
+    const int modeButton = mode == PadMode::Outs ? 0 : std::min(static_cast<int>(mode), 3);
     for (int i = 0; i < 4; ++i)
-        f[modes[i]] = i == std::min(static_cast<int>(mode), 3)
-                        ? LampState {mode == PadMode::Kit ? LampMode::BlinkSlow : LampMode::On, io::lampcolour::white, 0}
-                        : LampState {};
+        f[modes[i]] = i == modeButton ? LampState {mode == PadMode::Kit || mode == PadMode::Outs ? LampMode::BlinkSlow : LampMode::On,
+                                                   io::lampcolour::white, 0}
+                                      : LampState {};
     const int q = player_.quantize.load();
     for (int i = 0; i < 3; ++i)
         f[static_cast<C>(static_cast<int>(C::Bar1) + i)] = i == q ? LampState {LampMode::On, io::lampcolour::white, 0} : LampState {};

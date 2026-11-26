@@ -3,7 +3,8 @@
 An interactive tracker-module player for the Pioneer DJ TORAIZ SP-16. It plays MOD, S3M, XM, IT and the other
 formats [libopenmpt](https://lib.openmpt.org) supports from a USB stick and turns them into something to perform
 with: pad modes for muting, looping, playing the module's instruments and sending channels through the SP-16's
-analog filter, MIDI clock and notes on the MIDI outs, and the pattern data as "digital rain" on the display.
+analog filter, channels on the single outputs OUT 3–8, MIDI clock and notes on the MIDI outs, and the pattern data as
+"digital rain" on the display.
 
 Status: first implementation (0.1.0). The engine is tested on a build machine (`tests/`); the unit test of the whole
 app is pending. The app is started from the community [boot menu](https://github.com/freesp16/bootmenu); nothing is
@@ -26,7 +27,8 @@ Quit before pulling the stick: the menu and the app write their logs to it.
 - **LIBRARY**: every module on the stick. Turn SELECT to choose, push SELECT to play.
 - **PLAYER**: the pattern rain. The rows fall onto the playhead line, flare in their instrument's colour as they
   cross it, and fade into a trail. Column headers show each channel's level; muted channels are grey, filtered ones
-  orange. The context bar shows order, row, speed, BPM, the title and the pad modes.
+  orange. The context bar shows order, row, speed, BPM, the title and the pad modes. In the OUTS pad mode the body
+  shows the OUTS page instead (below).
 
 BACK switches between them (HOME: the library).
 
@@ -40,7 +42,7 @@ An interactive map of the panel with every control: [docs/panel.html](docs/panel
 | STOP | Stop and rewind. SHIFT + STOP also clears mutes, solos and the master filter |
 | SELECT turn / push | Library: choose / play. Player: the instrument for the PLAY pads / back to the library |
 | SCENE / PATTERN | Previous / next module. With SHIFT: the PLAY pads' octave |
-| STEP 1–16 | Jump to order 1–16 of the current order page; the jump is quantized (BAR keys). SHIFT + STEP n: order page n |
+| STEP 1–16 | Jump to order 1–16 of the current order page; the jump is quantized (BAR keys). SHIFT + STEP n: order page n. In the OUTS pad mode: the outputs (below) |
 | BAR 1 / 2 / 3 | Jumps at the pattern end / on the beat / on the next row |
 | BAR 4 | Pattern loop on/off |
 | REC | MIDI notes out on/off (module channels 1–16 → MIDI channels 1–16) |
@@ -61,8 +63,44 @@ An interactive map of the panel with every control: [docs/panel.html](docs/panel
 | SLICE | **LOOP** | Hold: loop 1, 2, 3, 4, 6, 8, 12, 16, 24, 32, 48, 64 rows (pads 1–12); on release the song continues where it would be, in time | Keep the loop running |
 | SCALE | **PLAY** | Play the selected instrument chromatically (pad 1 = C-5) | Select instrument |
 | SHIFT + SCALE | **KIT** | Pads 1–16 play instruments 1–16 at their standard pitch | — |
+| SHIFT + TRACK | **OUTS** | Hold (one or more) and press a STEP key: where those channels play (below) | +MAIN on/off |
 
 Pressing the active mode's key again shows the next 16 channels / instruments on the pads.
+
+### Single outputs (OUT 3–8)
+
+Each module channel plays on MAIN (the default), on one of the jacks OUT 3–8 in mono, or on a jack pair in stereo
+(3-4, 5-6, 7-8). **+MAIN** keeps a channel that goes to a jack on MAIN as well. In the **OUTS** pad mode
+(SHIFT + TRACK, or tap FILTER on the screen while it is selected):
+
+| Do | Result |
+|---|---|
+| Hold pads, press STEP 1 (or 2) | Those channels back to MAIN |
+| Hold pads, press STEP 3 … 8 | Those channels to that jack, mono |
+| Hold pads, press STEP 3 + 4 (5 + 6, 7 + 8) together | Those channels to the pair, stereo |
+| SHIFT + pad | +MAIN on/off |
+| STEP 3 … 8 alone | What the jack carries: CH (the channels sent to it) → CLEAN (the mix before the analog filter and DRIVE) → RETURN (the filter's return alone) → CLICK (a metronome, accent on the bar) |
+| SHIFT + STEP 1 | Identify the jacks: 1 beep on OUT 3, 2 on OUT 4 … 6 on OUT 8 |
+
+The pads show where each channel goes: faint = MAIN, the jack group's colour (blue 3-4, green 5-6, amber 7-8) lit for
+a pair and dim for a single jack, blinking with +MAIN, red blinking when no instance was free (below). Holding a pad
+lights the STEP keys of its outputs; without a pad they show what each jack carries. The **OUTS page** on the screen
+shows the same as a grid (tap a cell: MAIN, a jack — tap the other jack of a pair for stereo, the same jack again for
+MAIN — or +MAIN; tap a jack's name to change what it carries) with a level meter per jack.
+
+What the jacks get: the channels after mutes and solos, GAIN and the strip's volume, but before the analog filter and
+DRIVE and without MAIN VOLUME (direct outs), delayed like MAIN so both stay sample-aligned. A channel that is only on a
+single out is not on MAIN, so its FILTER pad does nothing (with +MAIN its MAIN copy can be filtered). A mono jack gets
+½ (L + R): the channel's level whatever its panning. PHONES follow MAIN.
+
+The layout is saved per module on the stick (`track16-data/track16/outs/<module>.txt`) and comes back when the module
+is loaded again; `outs=` in `track16.conf` sets the layout for modules without their own.
+
+How it works: the module plays as several libopenmpt instances in lockstep, one for MAIN, one for the filter loop and
+one per single-out destination in use, each mixing only its own channels. The pool has `out_stems` instances (default
+4, at most 6), so up to that many destinations (a pair counts as one) can be in use at once; jacks with CLEAN, RETURN
+or CLICK need none. Each instance costs CPU (measured on the build machine: 6 instances about twice the work of 2) and
+loading time; STAT lines log `outs=used/pool`.
 
 The analog filter's LP cutoff and resonance are analog knobs on the unit: hold a FILTER pad with one hand and turn
 them with the other. HP cutoff is read by the panel and sets the board's high-pass.
@@ -119,8 +157,16 @@ filter_loop=1        the analog filter loop (0: off)
 filter_latency=0     fixed loop latency in frames (0: measure at start)
 filter_send_gain=0.5 the filter send's level (−6 dB: headroom for the drive); the return is raised by 1/gain
 main_gain=0.5        the main DAC's level (−6 dB as the stock firmware: headroom for DRIVE); 1 = 6 dB louder, no headroom
+out_stems=4          instances for the single outs (0 … 6): how many destinations can be in use at once
+outs=                the single outs' layout for modules without their own, e.g. src=ch,ch,ch,ch,clean,click 1=3-4 2=5+
+outs_ident=0         1: at start, beep on each single out (1 beep on OUT 3 … 6 on OUT 8) to check the jacks
+audio_map=           the codec's channels per jack if the beeps come out of the wrong jack, e.g. out34:8/10,out56:4/6
 stat=10              seconds between STAT lines in bootmenu.log
 ```
+
+The `outs=` layout: `src=` lists what OUT 3 … 8 carry (`ch`, `clean`, `ret`, `click`), then `channel=destination`
+pairs with 1-based channels and destinations `3` … `8` or `3-4`, `5-6`, `7-8`; a trailing `+` keeps the channel on
+MAIN too.
 
 ## Build
 
@@ -136,14 +182,15 @@ scripts/test-host.sh ../modules         # engine tests with a folder of modules
 
 | Path | What it is |
 |---|---|
-| `app/Player.*` | The engine: libopenmpt on the audio thread, pad modes, quantized jumps, the stutter loop, the filter routes, MIDI clock and notes |
-| `app/Song.*` | Loading a module: the libopenmpt instances (two with the filter loop: "dry" and "wet" stems) and a snapshot of the pattern data |
+| `app/Player.*` | The engine: libopenmpt on the audio thread, pad modes, quantized jumps, the stutter loop, the filter routes, the single outs, MIDI clock and notes |
+| `app/Song.*` | Loading a module: the libopenmpt instances ("dry", the filter's "wet", the single outs' pool) and a snapshot of the pattern data |
+| `app/Outs.*` | The single outs' layout: destinations, jack sources, the text form, the assignment rules |
 | `app/Screen.*` | The UI: library, player, context bar, knob strip, the rain, the controls and the lamps |
 | `app/GlDisplay.*` | OpenGL ES output: the rain's rectangles and glyphs (an atlas built from the app font) under the UI |
 | `app/Midi.*` | MIDI in and the timed MIDI out |
 | `app/Library.*` | The module files on the stick |
 | `hw/` | The SP-16 hardware layer from juce-app-template (keep changes small) |
-| `third_party/libopenmpt` | libopenmpt 0.8.10 with a small position extension (see `VENDORED.md`) |
+| `third_party/libopenmpt` | libopenmpt 0.8.10 with a small extension: positions without seeking, silent channels (see `VENDORED.md`) |
 | `tests/` | Host tests of the engine |
 
 ## Based on juce-app-template

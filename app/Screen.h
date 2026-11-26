@@ -3,7 +3,8 @@
 //
 //   status row    TRACK16 › PLAYER | LIBRARY · the last event · fps, DSP · MIDI IN OUT · FILTER · NOTES · PLAY
 //   context bar   ↩ · ORDER | ROW · SPEED | BPM · title · the four pad modes (FILTER, MUTE, LOOP, PLAY/KIT)
-//   body          PLAYER: the rain (GL, see buildRain) · LIBRARY: the module list on the stick
+//   body          PLAYER: the rain (GL, see buildRain), or the OUTS page in the OUTS pad mode · LIBRARY: the module
+//                 list on the stick
 //   knob strip    TEMPO, PITCH, STEREO, INTERP, GAIN, VIEW (knobs 1–6)
 //
 // Controls (handle()): see the mapping in the README. Main thread only, except the loader thread, which reads and
@@ -56,6 +57,9 @@ struct ScreenConfig
     std::vector<std::string> roots; // where to look for modules
     bool autoplay = false;          // play the first module at start
     int stereoSeparation = 100, interpolation = 4;
+    int outStems = 4;               // instances for the single outs (out_stems)
+    std::string outsDefault;        // the single outs' layout for modules without their own (outs=, app/Outs.h)
+    std::string dataDir;            // per-module layouts go to <dataDir>/outs/
 };
 
 class Screen final : public juce::Component
@@ -87,6 +91,7 @@ private:
     struct ContextBar;
     struct Browser;
     struct KnobStrip;
+    struct OutsPage;
     enum class View { Player, Library };
     enum class Density { Auto, Full, Medium, Compact, Rain };
 
@@ -99,6 +104,14 @@ private:
     void padPress(int pad0, int velocity, bool fromReader, double nowMs);
     void padRelease(int pad0, double nowMs);
     void event(const juce::String& text);
+    // the single outs: the layout of the module that plays, its file, editing it
+    void loadLayout();
+    void saveLayout();
+    void changeLayout(const juce::String& what, double nowMs);
+    void setChannelDest(int channel, std::uint8_t dest);
+    void outsStep(int step0, double nowMs); // a STEP key in the OUTS pad mode
+    void outsTouch(juce::Point<float> at, double nowMs);
+    bool outsVisible() const;
     void buildRain(double nowMs);
 
     Player& player_;
@@ -110,6 +123,7 @@ private:
     ContextBar* context_ = nullptr;
     Browser* browser_ = nullptr;
     KnobStrip* knobs_ = nullptr;
+    OutsPage* outsPage_ = nullptr;
 
     View view_ = View::Library;
     Density density_ = Density::Auto;
@@ -122,7 +136,7 @@ private:
         int index = -1;
         std::string path;
         bool play = false, stems = false;
-        int sampleRate = 44100;
+        int sampleRate = 44100, outStems = 0;
     };
     struct Loaded
     {
@@ -145,6 +159,11 @@ private:
     int orderPage_ = 0, touchRow_ = -1;
     std::uint64_t mutes_ = 0, solos_ = 0;
     std::uint64_t padsHeld_ = 0;
+    std::uint32_t stepsHeld_ = 0; // STEP keys down (bit 0 = STEP 1)
+    outs::Layout layout_, outsShown_;
+    std::string layoutFile_;
+    bool layoutDirty_ = false;
+    double layoutSaveMs_ = 0, outsMeterMs_ = 0;
     double lastFrameMs_ = 0, backDownMs_ = -1;
     juce::String statusBase_;
     std::array<double, 16> padHitMs_ {};
