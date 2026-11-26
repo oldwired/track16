@@ -65,7 +65,7 @@ inline const juce::Rectangle<float> slotA {16, ctlY, 96, ctlH}, slotB {120, ctlY
 inline constexpr float readoutX = 664, menuButtonW = 104;
 inline juce::Rectangle<float> menuButton(int i) { return {slotE.getX() + (menuButtonW + gap) * static_cast<float>(i), ctlY, menuButtonW, ctlH}; }
 inline constexpr float tabW = 248, tabTopW = 224, tabH = 24, columnX0 = 16, columnW = 208;
-inline constexpr float columnCaptionY = 660, columnValueY = 704, columnTrackY = 739, columnUnderlineY = 720;
+inline constexpr float columnCaptionY = 654, columnValueY = 694, columnTrackY = 738, columnUnderlineY = 720; // large type
 inline constexpr float meterColumnX = 1176;
 } // namespace layout
 

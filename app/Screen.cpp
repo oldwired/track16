@@ -341,22 +341,22 @@ struct Screen::KnobStrip final : juce::Component
         tabPath.addQuadrilateral(0, L::stripY, L::tabTopW, L::stripY, L::tabW, L::stripY + L::tabH, 0, L::stripY + L::tabH);
         g.setColour(c::surface2);
         g.fillPath(tabPath);
-        theme::text(g, 16, L::stripY + 13, Align::Left, Text::Caption, c::text2, tab);
+        theme::text(g, 16, L::stripY + 13, Align::Left, Text::Label, c::text2, tab);
         for (int n = 0; n < 6; ++n)
         {
             const auto i = static_cast<std::size_t>(n);
             const float x = L::columnX0 + L::columnW * static_cast<float>(n), cx = x + L::columnW / 2;
-            theme::text(g, cx, L::columnCaptionY, Align::Centre, Text::Caption, c::text2, captions[n]);
-            theme::text(g, cx, L::columnValueY, Align::Centre, Text::Value, c::text1, text[i]);
+            theme::text(g, cx, L::columnCaptionY, Align::Centre, Text::Title, c::text2, captions[n]);
+            theme::text(g, cx, L::columnValueY, Align::Centre, Text::ValueL, c::text1, text[i]);
             if (underlined[i])
             {
                 g.setColour(c::accent);
-                g.fillRoundedRectangle(x + 64, L::columnUnderlineY, 80, 2, 1);
+                g.fillRoundedRectangle(x + 56, L::columnUnderlineY, 96, 3, 1.5f);
             }
             g.setColour(c::borderStrong);
-            g.fillRoundedRectangle(x + 40, L::columnTrackY, 128, 2, 1);
+            g.fillRoundedRectangle(x + 32, L::columnTrackY, 144, 3, 1.5f);
             g.setColour(c::text2);
-            g.fillRoundedRectangle(x + 40, L::columnTrackY, std::max(2.0f, 128.0f * std::clamp(value[i], 0.0f, 1.0f)), 2, 1);
+            g.fillRoundedRectangle(x + 32, L::columnTrackY, std::max(3.0f, 144.0f * std::clamp(value[i], 0.0f, 1.0f)), 3, 1.5f);
         }
     }
 };
@@ -373,7 +373,7 @@ juce::Colour groupColour(int group, float alpha = 1.0f) { return juce::Colour(0x
 
 struct Screen::OutsPage final : juce::Component
 {
-    static constexpr float kHeadH = 40, kJackY = 44, kJackH = 60, kRowY = 112, kRowH = 22;
+    static constexpr float kHeadH = 36, kJackY = 38, kJackH = 66, kRowY = 108, kRowH = 23; // as large as 16 rows allow
     static constexpr float kNameX = 16, kMainX = 312, kColW = 104, kAlsoX = 1168, kAlsoW = 96;
     static float jackX(int j) { return 440 + 112 * static_cast<float>(j) + 20 * static_cast<float>(j / 2); }
 
@@ -407,19 +407,18 @@ struct Screen::OutsPage final : juce::Component
     {
         g.fillAll(c::bg);
         const float w = static_cast<float>(getWidth());
-        theme::text(g, 16, kHeadH / 2, Align::Left, Text::Label, c::text1, "OUTS");
+        theme::text(g, 16, kHeadH / 2, Align::Left, Text::Title, c::text1, "OUTS");
         juce::String pool = "INSTANCES " + juce::String(stemsUsed) + "/" + juce::String(stemsTotal);
         if (unserved != 0)
             pool += "  " + kDot + "  POOL FULL: " + juce::String(__builtin_popcount(unserved)) + " NOT ROUTED (out_stems)";
-        theme::text(g, 92, kHeadH / 2, Align::Left, Text::Caption, unserved != 0 ? c::warn : c::text2, pool);
-        theme::text(g, w - 16, kHeadH / 2, Align::Right, Text::Caption, c::text3,
-                    "HOLD PADS + STEP 1 MAIN / 3-8 JACK (TWO: PAIR)  " + kDot + "  SHIFT+PAD: +MAIN  " + kDot + "  STEP: SOURCE  " + kDot
-                        + "  SHIFT+STEP 1-10: TEST TONE");
+        theme::text(g, 100, kHeadH / 2, Align::Left, Text::Body, unserved != 0 ? c::warn : c::text2, pool);
+        theme::text(g, w - 16, kHeadH / 2, Align::Right, Text::Label, c::text3,
+                    "PADS + STEP: ROUTE  " + kDot + "  SHIFT+PAD: +MAIN  " + kDot + "  STEP: SOURCE  " + kDot + "  SHIFT+STEP: TONE");
         if (layout == nullptr)
             return;
         // The jacks: name, source, level.
-        theme::text(g, kMainX + kColW / 2, kJackY + 16, Align::Centre, Text::Caption, c::text2, "MAIN");
-        theme::text(g, kAlsoX + kAlsoW / 2, kJackY + 16, Align::Centre, Text::Caption, c::text2, "+MAIN");
+        theme::text(g, kMainX + kColW / 2, kJackY + kJackH / 2, Align::Centre, Text::Title, c::text2, "MAIN");
+        theme::text(g, kAlsoX + kAlsoW / 2, kJackY + kJackH / 2, Align::Centre, Text::Title, c::text2, "+MAIN");
         for (int j = 0; j < outs::kJacks; ++j)
         {
             const float x = jackX(j);
@@ -427,9 +426,9 @@ struct Screen::OutsPage final : juce::Component
             const bool testing = toneJack == j;
             g.setColour(testing ? c::accentWeak : c::surface2);
             g.fillRoundedRectangle(x, kJackY, kColW, kJackH, theme::radiusM);
-            theme::text(g, x + kColW / 2, kJackY + 16, Align::Centre, Text::Caption, testing ? c::accent : c::text2,
+            theme::text(g, x + kColW / 2, kJackY + 15, Align::Centre, Text::Label, testing ? c::accent : c::text2,
                         "OUT " + juce::String(j + 3));
-            theme::text(g, x + kColW / 2, kJackY + 38, Align::Centre, Text::BodyStrong,
+            theme::text(g, x + kColW / 2, kJackY + 39, Align::Centre, Text::Title,
                         src == outs::Source::Channels ? groupColour(j / 2) : c::text1, outs::sourceName(src));
             const float lv = std::clamp(std::sqrt(level[static_cast<std::size_t>(j)]), 0.0f, 1.0f);
             g.setColour(c::borderStrong);
@@ -458,7 +457,11 @@ struct Screen::OutsPage final : juce::Component
             juce::String name = juce::String(ch + 1).paddedLeft('0', 2);
             if (ch < static_cast<int>(song->channelNames.size()) && ! song->channelNames[static_cast<std::size_t>(ch)].empty())
                 name += "  " + juce::String::fromUTF8(song->channelNames[static_cast<std::size_t>(ch)].c_str());
-            theme::text(g, kNameX + 8, cy, Align::Left, Text::Caption, isMuted ? c::text3 : theme::track(r + 1), name);
+            {
+                juce::Graphics::ScopedSaveState clip(g);
+                g.reduceClipRegion(juce::Rectangle<float>(kNameX, y, kMainX - kNameX - 8, kRowH).toNearestInt());
+                theme::text(g, kNameX + 8, cy, Align::Left, Text::Title, isMuted ? c::text3 : theme::track(r + 1), name);
+            }
             // MAIN
             if (d == outs::kMain || also)
             {
@@ -491,7 +494,7 @@ struct Screen::OutsPage final : juce::Component
                 else
                     g.fillRoundedRectangle(x0, y + 5, x1 - x0, kRowH - 10, 4);
                 if (outs::isPair(d))
-                    theme::text(g, (x0 + x1) / 2, cy, Align::Centre, Text::Caption, notRouted ? c::warn : c::bg, "STEREO");
+                    theme::text(g, (x0 + x1) / 2, cy, Align::Centre, Text::Label, notRouted ? c::warn : c::bg, "STEREO");
             }
             // +MAIN
             g.setColour(also ? c::text1 : c::border);
