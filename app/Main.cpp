@@ -138,6 +138,12 @@ int run()
     player.midiNotes = settings["midi_notes"] == "1";
     player.midiOffsetMs = number(settings, "midi_offset_ms", 0);
 
+    // Before the audio starts (the audio thread reads them from its first period).
+    Midi midi(player, settings["midi_out"]);
+    player.setMidi(&midi);
+    if (const int latency = number(settings, "filter_latency", 0); latency > 0)
+        player.setFixedLatency(latency);
+
     std::vector<std::unique_ptr<platform::AudioDevice>> audioDevices;
     platform::AudioDevice* audio = nullptr;
     if (settings["audio"] == "1")
@@ -167,8 +173,6 @@ int run()
     }
     auto lamps = machine->lamps(); // null on a desktop
 
-    Midi midi(player, settings["midi_out"]);
-    player.setMidi(&midi);
     if (settings["midi"] == "1")
     {
         std::string log;
@@ -187,8 +191,6 @@ int run()
     screenConfig.autoplay = settings["autoplay"] == "1";
     screenConfig.stereoSeparation = player.stereoSeparation.load();
     screenConfig.interpolation = player.interpolation.load();
-    if (const int latency = number(settings, "filter_latency", 0); latency > 0)
-        player.setFixedLatency(latency);
     Screen screen(player, midi, screenConfig);
     screen.onQuit = [] { platform::requestQuit(); };
     std::string error;
@@ -210,7 +212,8 @@ int run()
     std::vector<MidiMessageIn> midiIn;
     io::LampFrame lampFrame;
     const double statMs = 1000.0 * std::atof(settings["stat"].c_str());
-    double lastStat = start, lastMidiScan = start, fpsFrom = start;
+    double lastStat = start, lastMidiScan = start, fpsFrom = start, lastRemeasure = start;
+    std::uint64_t lastLoopDrops = ~0ull;
     long frames = 0, fpsFrames = 0;
     float fps = 0;
     while (! stopSignal && ! platform::quitRequested())
@@ -242,6 +245,24 @@ int run()
         {
             screen.lamps(lampFrame, now);
             io::apply(lampFrame, now, io::LampBrightness::Normal, *lamps); // sent on change (+ a 4 Hz heartbeat)
+        }
+        // The filter loop's latency: measured once the lamps have shown ACTIVE for a few frames (the lamp drives the
+        // filter board's select line), and again after the loop dropped periods (at most every 10 s, when no route is on).
+        if (frames == 3 || (! lamps && frames == 0))
+            player.armMeasure();
+        if (audio != nullptr && player.measurements() > 0)
+        {
+            const auto drops = audio->stats().loopDrops;
+            if (drops != lastLoopDrops && now - lastRemeasure >= 10000.0)
+            {
+                if (lastLoopDrops != ~0ull)
+                {
+                    logLine("FILTER LOOP %llu dropped periods: measuring again", static_cast<unsigned long long>(drops - lastLoopDrops));
+                    player.remeasure();
+                }
+                lastLoopDrops = drops;
+                lastRemeasure = now;
+            }
         }
         if (! gl.draw(screen.scene(now)))
         {
@@ -279,8 +300,17 @@ int run()
     logLine("STOP after %.1f s, %ld frames", (nowMs() - start) / 1000.0, frames);
     if (lamps)
         io::apply(io::LampFrame {}, nowMs(), io::LampBrightness::Normal, *lamps);
+    // MIDI: the player sends Stop and its note-offs, the sender writes them; then all notes off on every channel
+    // (whatever else may hang on the followers), before the ports close.
+    player.stop();
+    usleep(100 * 1000);
     for (auto& device : audioDevices)
         device->stop();
+    for (int c = 0; c < 16; ++c)
+    {
+        const std::uint8_t allOff[3] = {static_cast<std::uint8_t>(0xB0 | c), 123, 0};
+        midi.send(allOff, 3);
+    }
     midi.stop();
     for (auto& input : inputs)
         input->stop();

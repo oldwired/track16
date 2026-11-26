@@ -757,6 +757,9 @@ public:
 	void ResetMixStat() { m_nMixStat = 0; }
 	void ResetPlayPos();
 	void SetCurrentOrder(ORDERINDEX nOrder);
+	// Track16 addition (not upstream): play (order, row) after the current row (now: at once), without resetting
+	// the channels or simulating the song up to there. The caller checks the position.
+	void Track16SetNextPosition(ORDERINDEX order, ROWINDEX row, bool now);
 	std::string GetTitle() const { return m_songName; }
 	bool SetTitle(const std::string &newTitle); // Return true if title was changed.
 	const char *GetSampleName(SAMPLEINDEX nSample) const;

@@ -39,7 +39,7 @@ BACK switches between them (HOME: the library).
 | SELECT turn / push | Library: choose / play. Player: the instrument for the PLAY pads / back to the library |
 | SCENE / PATTERN | Previous / next module. With SHIFT: the PLAY pads' octave |
 | STEP 1–16 | Jump to order 1–16 of the current order page; the jump is quantized (BAR keys). SHIFT + STEP n: order page n |
-| BAR 1 / 2 / 3 | Jumps at the pattern end / on the beat / at once |
+| BAR 1 / 2 / 3 | Jumps at the pattern end / on the beat / on the next row |
 | BAR 4 | Pattern loop on/off |
 | REC | MIDI notes out on/off (module channels 1–16 → MIDI channels 1–16) |
 | ANALOG FILTER ACTIVE | The whole mix through the analog filter |
@@ -54,22 +54,29 @@ BACK switches between them (HOME: the library).
 |---|---|---|---|
 | TRACK | **FILTER** | Hold: that channel through the analog filter | Keep it there (latch) |
 | MUTE | **MUTE** | Mute on/off | Solo on/off |
-| SLICE | **LOOP** | Hold: loop 1, 2, 3, 4, 6, 8, 12, 16, 24, 32, 48, 64 rows (pads 1–12); release returns to where the song would be | Keep the loop running |
+| SLICE | **LOOP** | Hold: loop 1, 2, 3, 4, 6, 8, 12, 16, 24, 32, 48, 64 rows (pads 1–12); on release the song continues where it would be, in time | Keep the loop running |
 | SCALE | **PLAY** | Play the selected instrument chromatically (pad 1 = C-5) | Select instrument |
 | SHIFT + SCALE | **KIT** | Pads 1–16 play instruments 1–16 at their standard pitch | — |
 
 Pressing the active mode's key again shows the next 16 channels / instruments on the pads.
 
 The analog filter's LP cutoff and resonance are analog knobs on the unit: hold a FILTER pad with one hand and turn
-them with the other. HP cutoff and drive are read by the panel. Track16 measures the filter loop's latency at start
-and delays the unfiltered channels by it, so both paths stay aligned.
+them with the other. HP cutoff and drive are read by the panel.
+
+Track16 measures the filter loop's latency at start (ANALOG FILTER ACTIVE lights up for a moment; nothing plays until
+it is done) and delays the unfiltered channels by it, so both paths stay aligned. The result is shown and logged
+(`FILTER LOOP latency …`); "no return" means the click did not come back (LP cutoff closed?) and a guess is used.
+After the loop drops periods it is measured again as soon as no channel goes through the filter.
+
+Loops, the pattern loop and jumps take effect at a row boundary, so the song never stutters off the grid.
 
 ## MIDI
 
 - **Clock**: 24 pulses per beat from the module's actual row timing (`rows_per_beat`, default 4), Start / Stop /
-  Continue, and Song Position Pointer after jumps. Sent to the ports `midi_out` selects.
+  Continue, and Song Position Pointer after jumps and pattern-loop repeats. The stutter loop sends neither: it returns
+  in time, where a follower counting the clock already is. Sent to the ports `midi_out` selects.
 - **Notes** (REC, or `midi_notes=1`): the notes of module channels 1–16 on MIDI channels 1–16, velocity from the
-  volume column. Muting a channel ends its MIDI note.
+  volume column. Muting a channel ends its MIDI note, REC off ends them all; quitting sends Stop and All Notes Off.
 - **In**: notes play the selected instrument.
 
 All MIDI out is timed against the audio output (`midi_offset_ms` adjusts it per setup).
@@ -113,7 +120,7 @@ scripts/test-host.sh ../modules         # engine tests with a folder of modules
 | `app/Midi.*` | MIDI in and the timed MIDI out |
 | `app/Library.*` | The module files on the stick |
 | `hw/` | The SP-16 hardware layer from juce-app-template (keep changes small) |
-| `third_party/libopenmpt` | libopenmpt 0.8.10 (see `VENDORED.md`) |
+| `third_party/libopenmpt` | libopenmpt 0.8.10 with a small position extension (see `VENDORED.md`) |
 | `tests/` | Host tests of the engine |
 
 ## Based on juce-app-template

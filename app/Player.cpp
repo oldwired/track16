@@ -58,6 +58,7 @@ Player::Player()
     padChannel_.fill(-1);
     noteChannel_.fill(-1);
     midiNoteOn_.fill(-1);
+    filterPadChannel_.fill(-1);
 }
 
 Player::~Player()
@@ -97,7 +98,10 @@ void Player::jump(int order, Quantize q) noexcept
 {
     post({Event::Jump, static_cast<std::int16_t>(order), static_cast<std::int16_t>(q)});
 }
-void Player::padRelease(int pad0) noexcept { post({Event::PadOff, static_cast<std::int16_t>(pad0 & 15)}); }
+void Player::padRelease(int pad0, int hit) noexcept
+{
+    post({Event::PadOff, static_cast<std::int16_t>(pad0 & 15), 0, static_cast<std::int16_t>(static_cast<std::uint16_t>(hit))});
+}
 void Player::toggleLoopLatch() noexcept { post({Event::LoopLatch}); }
 void Player::toggleFilterLatch(int channel) noexcept { post({Event::FilterLatch, static_cast<std::int16_t>(channel)}); }
 void Player::midiNote(int note, int velocity) noexcept
@@ -119,7 +123,10 @@ bool Player::push(const platform::TriggerNow& t) noexcept
     if (t.pad == platform::kPressureTriggerPad)
         return true; // pressure: not used
     if (t.pad >= 0 && t.pad < 16 && t.velocity > 0)
-        return post({Event::PadOn, t.pad, t.velocity});
+    {
+        const auto hit = static_cast<std::uint16_t>(padHits_[static_cast<std::size_t>(t.pad)].fetch_add(1, std::memory_order_relaxed) + 1);
+        return post({Event::PadOn, t.pad, t.velocity, static_cast<std::int16_t>(hit)});
+    }
     return false;
 }
 
@@ -130,6 +137,7 @@ void Player::prepare(double sampleRate, int)
     sampleRate_ = sampleRate > 0 ? sampleRate : 44100.0;
     delayL_.assign(kMaxDelay, 0.0f);
     delayR_.assign(kMaxDelay, 0.0f);
+    measureBuf_.assign(8192, 0.0f);
     delayWrite_ = 0;
 }
 
@@ -137,6 +145,8 @@ void Player::adopt(Song* song) noexcept
 {
     if (song_ != nullptr)
     {
+        if (playingNow_ && midiClock.load(std::memory_order_relaxed))
+            midiByte(frame_, 0xFC);
         midiAllNotesOff(frame_);
         retired_.store(song_, std::memory_order_release);
     }
@@ -147,9 +157,14 @@ void Player::adopt(Song* song) noexcept
     rowFrame_ = 0;
     rowFrames_ = 0;
     pendingJump_ = -1;
-    loopOn_ = loopLatch_ = false;
+    naturalValid_ = false;
+    nextWhy_ = Next::Natural;
+    loopOn_ = loopLatch_ = returnPending_ = false;
+    loopPad_ = -1;
     filterHeld_ = filterLatchBits_ = 0;
-    appliedDry_ = appliedWet_ = 0; // a fresh module has nothing muted
+    filterPadChannel_.fill(-1);
+    appliedDry_ = 0;    // a fresh module has nothing muted …
+    appliedWet_ = ~0ull; // … but the wet one (loadSong mutes all of it)
     masksDirty_ = true;
     appliedTempo_ = appliedPitch_ = -1;
     appliedSep_ = appliedInterp_ = -1;
@@ -158,13 +173,13 @@ void Player::adopt(Song* song) noexcept
     playingNow_ = false;
     startedOnce_ = false;
     pulsesLeft_ = 0;
-    order__.store(0);
-    row__.store(0);
-    pattern__.store(pattern_);
     queuedOrder_.store(-1);
     loopActive_.store(false);
     loopLatched_.store(false);
+    publishPosition();
     serial_.fetch_add(1, std::memory_order_release);
+    if (song->playOnAdopt)
+        handle({Event::Play});
 }
 
 int Player::validOrder(int order) const noexcept
@@ -209,34 +224,137 @@ void Player::advance(int& order, int& row, long rows) const noexcept
     }
 }
 
-void Player::setPosition(int order, int row) noexcept
+void Player::publishPosition() noexcept
+{
+    order__.store(order_, std::memory_order_relaxed);
+    row__.store(row_, std::memory_order_relaxed);
+    pattern__.store(pattern_, std::memory_order_relaxed);
+}
+
+// ---- positions ----
+
+void Player::seekNow(int order, int row) noexcept
 {
     if (song_ == nullptr)
         return;
     order = validOrder(order);
     row = std::clamp(row, 0, std::max(0, data_->patternRows(data_->orderPattern(order)) - 1));
-    song_->dry->set_position_order_row(order, row);
-    if (song_->wet)
-        song_->wet->set_position_order_row(order, row);
-    order_ = order;
-    row_ = row;
+    song_->dryP->jump_to_position(order, row);
+    if (song_->wetP != nullptr)
+        song_->wetP->jump_to_position(order, row);
+    order_ = songOrder_ = order;
+    row_ = songRow_ = row;
     pattern_ = data_->orderPattern(order);
-    jumped_ = true;
-    if (playingNow_ && midiClock.load(std::memory_order_relaxed))
+    naturalValid_ = false; // the module starts the row with its next read
+    nextWhy_ = Next::Natural;
+    rowFrame_ = 0;
+    publishPosition();
+}
+
+void Player::rewindSong() noexcept
+{
+    if (song_ == nullptr)
+        return;
+    song_->dryP->rewind();
+    if (song_->wetP != nullptr)
+        song_->wetP->rewind();
+    order_ = songOrder_ = 0;
+    row_ = songRow_ = 0;
+    pattern_ = data_->orderPattern(0);
+    naturalValid_ = false;
+    nextWhy_ = Next::Natural;
+    rowFrame_ = 0;
+    masksDirty_ = masksForce_ = true; // the reset may touch the channels' flags: apply the masks again
+    publishPosition();
+}
+
+void Player::captureNatural() noexcept
+{
+    song_->dryP->get_next_position(natOrder_, natRow_);
+    naturalValid_ = true;
+    nextWhy_ = Next::Natural;
+}
+
+void Player::scheduleNext(int order, int row, Next why) noexcept
+{
+    if (why == Next::Natural)
     {
-        midiByte(frame_, 0xFC); // stop, move, continue: followers jump with us
-        midiSongPosition(frame_);
-        midiByte(frame_, 0xFB);
+        if (nextWhy_ != Next::Natural) // give the module its own next row back
+        {
+            song_->dryP->set_next_position(natOrder_, natRow_);
+            if (song_->wetP != nullptr)
+                song_->wetP->set_next_position(natOrder_, natRow_);
+        }
+        nextWhy_ = Next::Natural;
+        return;
     }
+    if (why == nextWhy_ && order == nextOrder_ && row == nextRow_)
+        return;
+    song_->dryP->set_next_position(order, row);
+    if (song_->wetP != nullptr)
+        song_->wetP->set_next_position(order, row);
+    nextWhy_ = why;
+    nextOrder_ = order;
+    nextRow_ = row;
+}
+
+// A row with a pattern delay runs its navigation effects again on each repeat, which overwrites ours: set it again.
+void Player::reassertNext() noexcept
+{
+    if (nextWhy_ == Next::Natural)
+        return;
+    std::int32_t o = 0, r = 0;
+    song_->dryP->get_next_position(o, r);
+    if (o != nextOrder_ || r != nextRow_)
+    {
+        song_->dryP->set_next_position(nextOrder_, nextRow_);
+        if (song_->wetP != nullptr)
+            song_->wetP->set_next_position(nextOrder_, nextRow_);
+    }
+}
+
+// What the row after this one is: the stutter loop, a due jump, the loop's return, the pattern loop, or the module's.
+void Player::planNext() noexcept
+{
+    if (song_ == nullptr || ! playingNow_ || ! naturalValid_)
+        return;
+    if (loopOn_)
+    {
+        int next = row_ + 1;
+        if (order_ != loopOrder_ || next >= loopStart_ + loopLen_ || next < loopStart_)
+            next = loopStart_;
+        scheduleNext(loopOrder_, next, Next::Loop);
+        return;
+    }
+    if (pendingJump_ >= 0)
+    {
+        const int rpb = std::max(1, rowsPerBeat.load(std::memory_order_relaxed));
+        const bool patternEnds = natOrder_ != order_ || natRow_ == 0;
+        const bool due = pendingQuant_ == static_cast<int>(Quantize::Now)
+                      || (pendingQuant_ == static_cast<int>(Quantize::Pattern) && patternEnds)
+                      || (pendingQuant_ == static_cast<int>(Quantize::Beat) && (patternEnds || natRow_ % rpb == 0));
+        if (due)
+        {
+            scheduleNext(pendingJump_, 0, Next::Jump);
+            return;
+        }
+    }
+    if (returnPending_)
+        scheduleNext(returnOrder_, returnRow_, Next::Return);
+    else if (patternLoop.load(std::memory_order_relaxed) && natOrder_ != order_)
+        scheduleNext(order_, 0, Next::PatternLoop);
+    else
+        scheduleNext(0, 0, Next::Natural);
 }
 
 void Player::midiSend(std::uint64_t frame, const std::uint8_t* bytes, int size) noexcept
 {
-    if (midi_ == nullptr)
+    MidiScheduler* midi = midi_.load(std::memory_order_acquire);
+    if (midi == nullptr)
         return;
     const double offset = static_cast<double>(frame - periodFrame_) + audioLatencyFrames.load(std::memory_order_relaxed);
     const double ns = offset / sampleRate_ * 1e9 + 1e6 * midiOffsetMs.load(std::memory_order_relaxed);
-    midi_->schedule(periodNs_ + static_cast<std::uint64_t>(std::max(0.0, ns)), bytes, size);
+    midi->schedule(periodNs_ + static_cast<std::uint64_t>(std::max(0.0, ns)), bytes, size);
 }
 
 void Player::midiSongPosition(std::uint64_t frame) noexcept
@@ -245,6 +363,17 @@ void Player::midiSongPosition(std::uint64_t frame) noexcept
     const long sixteenths = rows * pulsesPerRow_ / 6;
     const std::uint8_t spp[3] = {0xF2, static_cast<std::uint8_t>(sixteenths & 0x7F), static_cast<std::uint8_t>((sixteenths >> 7) & 0x7F)};
     midiSend(frame, spp, 3);
+}
+
+// The song moved somewhere a follower cannot count to: stop, the new position, continue (the row's first pulse follows).
+void Player::midiReposition(std::uint64_t frame) noexcept
+{
+    if (! playingNow_ || ! midiClock.load(std::memory_order_relaxed))
+        return;
+    flushPulses(frame); // the last row's pulses belong before the stop
+    midiByte(frame, 0xFC);
+    midiSongPosition(frame);
+    midiByte(frame, 0xFB);
 }
 
 void Player::midiAllNotesOff(std::uint64_t frame) noexcept
@@ -294,12 +423,17 @@ void Player::midiRowNotes(int pattern, int row, std::uint64_t frame) noexcept
     }
 }
 
+void Player::flushPulses(std::uint64_t frame) noexcept
+{
+    for (; pulsesLeft_ > 0; --pulsesLeft_) // the last row ended early (a faster speed, a pattern delay ending): catch up
+        midiByte(frame, 0xF8);
+}
+
 void Player::clockRow(std::uint64_t frame) noexcept
 {
     if (! midiClock.load(std::memory_order_relaxed) || ! playingNow_)
         return;
-    for (; pulsesLeft_ > 0; --pulsesLeft_) // the last row ended early (a jump, a faster speed): catch up
-        midiByte(frame, 0xF8);
+    flushPulses(frame);
     static constexpr int divisors[] = {1, 2, 3, 4, 6, 8, 12, 24};
     int rpb = rowsPerBeat.load(std::memory_order_relaxed);
     if (std::find(std::begin(divisors), std::end(divisors), rpb) == std::end(divisors))
@@ -322,57 +456,53 @@ void Player::clockChunk(std::uint64_t, std::uint64_t to) noexcept
     }
 }
 
-// A row has started (naturally or after a jump): quantized actions, then the row's MIDI.
+// A row has started: what brought us here (a scheduled move or the module), the row's MIDI, then the next row's plan.
 void Player::onRow(int order, int row, std::uint64_t frame) noexcept
 {
-    const bool natural = ! jumped_;
-    const bool patternChanged = order != order_;
-    const int previousOrder = order_;
-    jumped_ = false;
-    if (natural && rowFrame_ > 0 && frame > rowFrame_)
+    if (rowFrame_ > 0 && frame > rowFrame_)
     {
         const double len = static_cast<double>(frame - rowFrame_);
         if (len < sampleRate_ * 4)
             rowFrames_ = len;
     }
+    const Next arrived = nextWhy_ != Next::Natural && order == nextOrder_ && row == nextRow_ ? nextWhy_ : Next::Natural;
+    const bool continuous = nextOrder_ == natOrder_ && nextRow_ == natRow_; // where the module went anyway
+    const bool reposition = (arrived == Next::Jump || arrived == Next::PatternLoop) && ! continuous;
+    if (arrived == Next::Jump)
+    {
+        pendingJump_ = -1;
+        queuedOrder_.store(-1, std::memory_order_relaxed);
+        returnPending_ = false;
+    }
+    if (arrived == Next::Return)
+        returnPending_ = false;
     order_ = order;
     row_ = row;
     pattern_ = data_->orderPattern(order);
-
-    if (loopOn_)
+    // Where the song would be without the loop: a follower counting the clock is there too.
+    if (loopOn_ || returnPending_)
+        advance(songOrder_, songRow_, 1);
+    else
     {
-        ++loopElapsed_;
-        if (order != loopOrder_ || row >= loopStart_ + loopLen_ || row < loopStart_)
-            setPosition(loopOrder_, loopStart_);
+        songOrder_ = order;
+        songRow_ = row;
     }
-    else if (pendingJump_ >= 0)
-    {
-        const int rpb = std::max(1, rowsPerBeat.load(std::memory_order_relaxed));
-        const bool due = (pendingQuant_ == static_cast<int>(Quantize::Pattern) && patternChanged && natural)
-                      || (pendingQuant_ == static_cast<int>(Quantize::Beat) && row % rpb == 0);
-        if (due)
-        {
-            const int target = pendingJump_;
-            pendingJump_ = -1;
-            queuedOrder_.store(-1, std::memory_order_relaxed);
-            setPosition(target, 0);
-        }
-    }
-    else if (patternLoop.load(std::memory_order_relaxed) && patternChanged && natural)
-        setPosition(previousOrder, 0);
+    captureNatural();
 
     rowFrame_ = frame;
-    order__.store(order_, std::memory_order_relaxed);
-    row__.store(row_, std::memory_order_relaxed);
-    pattern__.store(pattern_, std::memory_order_relaxed);
+    publishPosition();
     const double ns = (static_cast<double>(frame - periodFrame_) + audioLatencyFrames.load(std::memory_order_relaxed)) / sampleRate_ * 1e9;
     rowStartNs_.store(periodNs_ + static_cast<std::uint64_t>(ns), std::memory_order_release);
     if (rowFrames_ > 0)
         rowSeconds_.store(rowFrames_ / sampleRate_, std::memory_order_relaxed);
+    if (reposition)
+        midiReposition(frame);
     clockRow(frame);
     midiRowNotes(pattern_, row_, frame);
+    planNext();
 }
 
+// Ends the stutter loop. returnInTime: the song continues with the next row where it would be without the loop.
 void Player::stopLoop(bool returnInTime) noexcept
 {
     if (! loopOn_)
@@ -382,15 +512,22 @@ void Player::stopLoop(bool returnInTime) noexcept
     loopPad_ = -1;
     if (returnInTime && song_ != nullptr)
     {
-        int o = loopOrder_, r = loopStart_;
-        advance(o, r, loopElapsed_);
-        setPosition(o, r);
-        onRow(order_, row_, frame_);
+        returnOrder_ = songOrder_;
+        returnRow_ = songRow_;
+        advance(returnOrder_, returnRow_, 1);
+        returnPending_ = true;
     }
+    else
+    {
+        songOrder_ = order_;
+        songRow_ = row_;
+    }
+    planNext();
 }
 
-void Player::padOn(int pad, int velocity) noexcept
+void Player::padOn(int pad, int velocity, int hit) noexcept
 {
+    padHitOn_[static_cast<std::size_t>(pad)] = static_cast<std::uint16_t>(hit);
     padHeld_.fetch_or(1ull << pad, std::memory_order_relaxed);
     if (song_ == nullptr)
         return;
@@ -400,6 +537,7 @@ void Player::padOn(int pad, int velocity) noexcept
     case PadMode::Filter:
         if (channel < data_->channels && channel < kMaxChannels)
         {
+            filterPadChannel_[static_cast<std::size_t>(pad)] = channel;
             filterHeld_ |= bit(channel);
             masksDirty_ = true;
         }
@@ -414,11 +552,17 @@ void Player::padOn(int pad, int velocity) noexcept
         {
             loopOrder_ = order_;
             loopStart_ = row_;
-            loopElapsed_ = 0;
             loopOn_ = true;
+            if (! returnPending_) // a loop right after a loop: the song position keeps counting from the first one
+            {
+                songOrder_ = order_;
+                songRow_ = row_;
+            }
+            returnPending_ = false;
         }
         loopLen_ = std::max(1, std::min(len, data_->patternRows(data_->orderPattern(loopOrder_)) - loopStart_));
         loopPad_ = pad;
+        planNext();
         break;
     }
     case PadMode::Play:
@@ -450,11 +594,11 @@ void Player::padOff(int pad) noexcept
     padHeld_.fetch_and(~(1ull << pad), std::memory_order_relaxed);
     if (song_ == nullptr)
         return;
-    const int channel = page.load(std::memory_order_relaxed) * 16 + pad;
-    if (filterHeld_ & bit(channel))
+    if (auto& ch = filterPadChannel_[static_cast<std::size_t>(pad)]; ch >= 0)
     {
-        filterHeld_ &= ~bit(channel);
+        filterHeld_ &= ~bit(ch);
         masksDirty_ = true;
+        ch = -1;
     }
     if (loopOn_ && loopPad_ == pad && ! loopLatch_)
         stopLoop(true);
@@ -478,8 +622,13 @@ void Player::handle(const Event& e) noexcept
 {
     switch (e.kind)
     {
-    case Event::PadOn: padOn(e.a & 15, e.b); break;
-    case Event::PadOff: padOff(e.a & 15); break;
+    case Event::PadOn: padOn(e.a & 15, e.b, static_cast<std::uint16_t>(e.c)); break;
+    case Event::PadOff:
+        // A release that belongs to an earlier hit of this pad (the pad was hit again before the UI passed the
+        // release on) must not end the newer one.
+        if (static_cast<std::uint16_t>(e.c) == padHitOn_[static_cast<std::size_t>(e.a & 15)])
+            padOff(e.a & 15);
+        break;
     case Event::Strip:
         tempoBend.store(e.b != 0 ? 1.0f + 0.08f * (static_cast<float>(e.a) - 64.0f) / 64.0f : 1.0f, std::memory_order_relaxed);
         break;
@@ -499,64 +648,62 @@ void Player::handle(const Event& e) noexcept
         }
         startedOnce_ = true;
         rowFrame_ = 0; // no row length from before the pause
-        onRow(order_, row_, frame_);
+        rowStartNs_.store(periodNs_ + static_cast<std::uint64_t>(audioLatencyFrames.load(std::memory_order_relaxed) / sampleRate_ * 1e9),
+                          std::memory_order_release);
+        clockRow(frame_);
+        midiRowNotes(pattern_, row_, frame_);
+        planNext(); // with a valid plan from before the pause (else after the first read)
         break;
     case Event::Pause:
     case Event::Stop:
         if (playingNow_ && midiClock.load(std::memory_order_relaxed))
+        {
+            flushPulses(frame_);
             midiByte(frame_, 0xFC);
+        }
         playingNow_ = false;
         pulsesLeft_ = 0;
         midiAllNotesOff(frame_);
         if (e.kind == Event::Stop && song_ != nullptr)
         {
             stopLoop(false);
+            returnPending_ = false;
             pendingJump_ = -1;
             queuedOrder_.store(-1);
-            setPosition(0, 0);
-            jumped_ = false;
+            rewindSong();
             startedOnce_ = false;
-            order__.store(0);
-            row__.store(0);
-            pattern__.store(pattern_);
         }
         break;
     case Event::Jump:
         if (song_ == nullptr)
             break;
-        if (e.b == static_cast<int>(Quantize::Now) || ! playingNow_)
+        if (! playingNow_)
         {
+            stopLoop(false);
+            returnPending_ = false;
             pendingJump_ = -1;
             queuedOrder_.store(-1);
-            stopLoop(false);
-            setPosition(e.a, 0);
-            if (playingNow_)
-                onRow(order_, row_, frame_);
-            else
-            {
-                jumped_ = false;
-                order__.store(order_);
-                row__.store(row_);
-                pattern__.store(pattern_);
-            }
+            seekNow(e.a, 0);
         }
         else
         {
+            stopLoop(true); // the jump takes over when it is due; until then the song continues in time
             pendingJump_ = validOrder(e.a);
             pendingQuant_ = e.b;
             queuedOrder_.store(pendingJump_);
+            planNext();
         }
         break;
     case Event::LoopLatch:
         if (loopOn_)
         {
             loopLatch_ = ! loopLatch_;
-            if (! loopLatch_ && ! (padHeld_.load() & (1ull << std::max(0, loopPad_))))
+            if (! loopLatch_ && (loopPad_ < 0 || ! (padHeld_.load() & (1ull << loopPad_))))
                 stopLoop(true);
         }
         break;
     case Event::FilterLatch:
-        if (e.a >= 0 && e.a < kMaxChannels)
+        if (song_ != nullptr && e.a >= 0 && e.a < std::min(data_->channels, kMaxChannels))
         {
             filterLatchBits_ ^= bit(e.a);
             masksDirty_ = true;
@@ -604,13 +751,12 @@ void Player::applyMasks() noexcept
     for (int c = 0; c < n; ++c)
     {
         const std::uint64_t b = bit(c);
-        if ((dry ^ appliedDry_) & b)
+        if (masksForce_ || ((dry ^ appliedDry_) & b))
             song_->dryI->set_channel_mute_status(c, (dry & b) != 0);
-        if (song_->wetI != nullptr && ((wet ^ appliedWet_) & b))
+        if (song_->wetI != nullptr && (masksForce_ || ((wet ^ appliedWet_) & b)))
             song_->wetI->set_channel_mute_status(c, (wet & b) != 0);
     }
-    if (song_->wetI == nullptr)
-        appliedWet_ = wet;
+    masksForce_ = false;
     // MIDI follows the mute: a channel muted now ends its note.
     if (midiFollowMute.load(std::memory_order_relaxed))
         for (int c = 0; c < std::min(16, n); ++c)
@@ -662,14 +808,19 @@ void Player::applySettings() noexcept
     }
 }
 
-// The loop latency: 4096 frames of silence (the noise floor), one short click into the send, then the return's
-// strongest sample within 8192 frames.
+// The loop latency: 4096 frames of silence (the noise floor), one short click into the send, then the return's onset
+// within 8192 frames: the first sample above 30 % of the peak (the peak itself moves with the LP cutoff).
 void Player::measure(const platform::AudioIO& io, float* sendL, float* sendR, int offset, int n) noexcept
 {
     const float* rl = io.in[2] + offset;
     const float* rr = io.in[3] + offset;
     for (int i = 0; i < n; ++i)
     {
+        if (measurePhase_ >= 2) // finished within this chunk
+        {
+            sendL[i] = sendR[i] = 0.0f;
+            continue;
+        }
         const float v = std::max(std::fabs(rl[i]), std::fabs(rr[i]));
         if (measurePhase_ == 0)
         {
@@ -681,18 +832,40 @@ void Player::measure(const platform::AudioIO& io, float* sendL, float* sendR, in
         else
         {
             sendL[i] = sendR[i] = measureCount_ < 8 ? 0.3f : 0.0f;
-            if (v > measurePeak_)
-                measurePeak_ = v, measureBest_ = measureCount_;
-            if (++measureCount_ >= 8192)
-            {
-                measurePhase_ = 2;
-                const bool ok = measurePeak_ > 4.0f * measureNoise_ && measurePeak_ > 1e-3f && measureBest_ > 0;
-                latency_.store(ok ? std::min(measureBest_, kMaxDelay - 1) : std::min(3 * io.frames, kMaxDelay - 1), std::memory_order_relaxed);
-                latencyMeasured_.store(ok, std::memory_order_relaxed);
-                return;
-            }
+            measureBuf_[static_cast<std::size_t>(measureCount_)] = v;
+            if (++measureCount_ >= static_cast<int>(measureBuf_.size()))
+                finishMeasure(io.frames);
         }
     }
+}
+
+void Player::finishMeasure(int frames) noexcept
+{
+    float peak = 0;
+    for (float v : measureBuf_)
+        peak = std::max(peak, v);
+    const float threshold = std::max(4.0f * measureNoise_, 0.3f * peak);
+    int onset = -1;
+    for (int i = 0; i < static_cast<int>(measureBuf_.size()); ++i)
+        if (measureBuf_[static_cast<std::size_t>(i)] >= threshold)
+        {
+            onset = i;
+            break;
+        }
+    const bool ok = peak > 4.0f * measureNoise_ && peak > 1e-3f && onset > 0;
+    if (ok)
+    {
+        latency_.store(std::min(onset, kMaxDelay - 1), std::memory_order_relaxed);
+        latencyMeasured_.store(true, std::memory_order_relaxed);
+    }
+    else if (! measureLive_) // at start: a guess; later: keep what the last measurement found
+    {
+        latency_.store(std::min(3 * frames, kMaxDelay - 1), std::memory_order_relaxed);
+        latencyMeasured_.store(false, std::memory_order_relaxed);
+    }
+    measurePhase_ = 2;
+    measureLive_ = false;
+    measurements_.fetch_add(1, std::memory_order_release);
 }
 
 void Player::process(const platform::AudioIO& io) noexcept
@@ -706,9 +879,6 @@ void Player::process(const platform::AudioIO& io) noexcept
     periodFrame_ = frame_;
     periodNs_ = io.hostTimeNs;
 
-    if (Song* s = incoming_.exchange(nullptr, std::memory_order_acq_rel))
-        adopt(s);
-
     // The filter loop: the send port and its return.
     constexpr int kSend = static_cast<int>(platform::AudioPort::FilterSend);
     float* sendL = kSend < io.numOutPorts ? io.out[2 * kSend] : nullptr;
@@ -719,8 +889,26 @@ void Player::process(const platform::AudioIO& io) noexcept
         stems_.store(loop, std::memory_order_relaxed);
         masksDirty_ = true;
     }
-    if (loop && measurePhase_ < 2 && latency_.load(std::memory_order_relaxed) > 0)
-        measurePhase_ = 2; // a fixed latency from the settings
+
+    // The latency measurement: at start once the lamps show ACTIVE (armMeasure, or after 3 s without), again on
+    // request when no route is on. The first one holds the events back, so nothing plays while the delay is unknown.
+    if (loop && fixedLatency_.load(std::memory_order_relaxed))
+        measurePhase_ = 2;
+    else if (loop && measurePhase_ < 0)
+    {
+        armWait_ += io.frames;
+        if (measureArm_.load(std::memory_order_acquire) || armWait_ > 3 * static_cast<int>(sampleRate_))
+            measurePhase_ = 0, measureCount_ = 0, measureNoise_ = 0;
+    }
+    else if (loop && measurePhase_ == 2 && measureRequest_.load(std::memory_order_acquire) && routeSend_ == 0 && routeMain_ == 0
+             && routeCount_ == 0)
+    {
+        measureRequest_.store(false, std::memory_order_relaxed);
+        measurePhase_ = 0, measureCount_ = 0, measureNoise_ = 0;
+        measureLive_ = true;
+    }
+    const bool measuringNow = loop && measurePhase_ < 2;
+    const bool holdEvents = measuringNow && ! measureLive_;
 
     if (const auto m = muteMask.load(std::memory_order_relaxed), s = soloMask.load(std::memory_order_relaxed); m != seenMute_ || s != seenSolo_)
     {
@@ -728,8 +916,17 @@ void Player::process(const platform::AudioIO& io) noexcept
         seenSolo_ = s;
         masksDirty_ = true;
     }
-    for (Event e; events_.pop(e);)
-        handle(e);
+    if (! holdEvents)
+    {
+        if (Song* song = incoming_.exchange(nullptr, std::memory_order_acq_rel))
+            adopt(song);
+        for (Event e; events_.pop(e);)
+            handle(e);
+    }
+    const bool notes = midiNotes.load(std::memory_order_relaxed);
+    if (midiNotesWas_ && ! notes) // REC off: end the notes that are on
+        midiAllNotesOff(frame_);
+    midiNotesWas_ = notes;
     applySettings();
     if (masksDirty_)
     {
@@ -737,24 +934,41 @@ void Player::process(const platform::AudioIO& io) noexcept
         masksDirty_ = false;
     }
 
-    // The route.
+    // The route: SEND switches now, MAIN when the return carries the new send (delayNow_ frames later).
+    const int delayWant = loop ? std::clamp(latency_.load(std::memory_order_relaxed), 0, kMaxDelay - 1) : 0;
+    if (delayWant != delayNow_)
+    {
+        delayPrev_ = delayNow_;
+        delayNow_ = delayWant;
+        fadeDelay_ = kFade;
+    }
     int route = static_cast<int>(FilterRoute::Off);
-    if (loop && measurePhase_ >= 2)
+    if (loop && ! measuringNow)
         route = masterFilter.load(std::memory_order_relaxed) ? static_cast<int>(FilterRoute::Master)
               : (filterHeld_ | filterLatchBits_) != 0 && song_ != nullptr && song_->wet ? static_cast<int>(FilterRoute::Channels)
                                                                                            : static_cast<int>(FilterRoute::Off);
-    if (route != routeNow_)
+    if (! loop)
     {
-        routePrev_ = routeNow_;
-        routeNow_ = route;
-        fade_ = kFade;
+        routeSend_ = routeMain_ = route;
+        fadeSend_ = fadeMain_ = 0;
+        routeCount_ = 0;
     }
-    route_.store(routeNow_, std::memory_order_relaxed);
-    measuring_.store(loop && measurePhase_ < 2, std::memory_order_relaxed);
+    else if (route != routeSend_)
+    {
+        sendPrev_ = routeSend_;
+        routeSend_ = route;
+        fadeSend_ = kFade;
+        const RouteChange change {frame_ + static_cast<std::uint64_t>(delayNow_), route};
+        if (routeCount_ < static_cast<int>(routeQueue_.size()))
+            routeQueue_[static_cast<std::size_t>((routeHead_ + routeCount_++) % static_cast<int>(routeQueue_.size()))] = change;
+        else // full: the newest change replaces the last one queued
+            routeQueue_[static_cast<std::size_t>((routeHead_ + routeCount_ - 1) % static_cast<int>(routeQueue_.size()))] = change;
+    }
+    route_.store(routeSend_ != 0 ? routeSend_ : routeMain_, std::memory_order_relaxed);
+    measuring_.store(measuringNow, std::memory_order_relaxed);
 
     const float volume = mainVolume.load(std::memory_order_relaxed);
     const float gain = std::pow(10.0f, gainDb.load(std::memory_order_relaxed) / 20.0f) * volume * volume;
-    const int delay = loop ? std::clamp(latency_.load(std::memory_order_relaxed), 0, kMaxDelay - 1) : 0;
     float peakL = 0, peakR = 0;
 
     for (int done = 0; done < io.frames;)
@@ -769,6 +983,13 @@ void Player::process(const platform::AudioIO& io) noexcept
             const int o = song_->dry->get_current_order(), r = song_->dry->get_current_row();
             if (o != order_ || r != row_)
                 onRow(o, r, frame_ + static_cast<std::uint64_t>(n));
+            else if (! naturalValid_) // the first read after a seek started the row: now its next row is known
+            {
+                captureNatural();
+                planNext();
+            }
+            else
+                reassertNext();
             clockChunk(frame_, frame_ + static_cast<std::uint64_t>(n));
         }
 
@@ -779,46 +1000,80 @@ void Player::process(const platform::AudioIO& io) noexcept
         const float* rl = loop ? io.in[2] + done : nullptr;
         const float* rr = loop ? io.in[3] + done : nullptr;
 
-        if (loop && measurePhase_ < 2)
+        const bool measured = loop && measurePhase_ >= 0 && measurePhase_ < 2; // measure() writes the send
+        if (measured)
             measure(io, sl, sr2, done, n);
 
         for (int i = 0; i < n; ++i)
         {
-            float outL, outR, sendLv = 0, sendRv = 0;
+            float outL = 0, outR = 0;
             if (loop)
             {
-                // The direct paths, delayed by the loop's latency (dry and wet separately).
+                const std::uint64_t now = frame_ + static_cast<std::uint64_t>(i);
+                while (routeCount_ > 0 && routeQueue_[static_cast<std::size_t>(routeHead_)].frame <= now)
+                {
+                    mainPrev_ = routeMain_;
+                    routeMain_ = routeQueue_[static_cast<std::size_t>(routeHead_)].route;
+                    fadeMain_ = kFade;
+                    routeHead_ = (routeHead_ + 1) % static_cast<int>(routeQueue_.size());
+                    --routeCount_;
+                }
+                // The direct path, delayed by the loop's latency (a latency change cross-fades the two taps).
                 const int w = delayWrite_;
-                const int rd = (w - delay + kMaxDelay) % kMaxDelay;
                 delayL_[static_cast<std::size_t>(w)] = dl[i];
                 delayR_[static_cast<std::size_t>(w)] = dr[i];
-                const float ddl = delayL_[static_cast<std::size_t>(rd)], ddr = delayR_[static_cast<std::size_t>(rd)];
+                const int rd = (w - delayNow_ + kMaxDelay) % kMaxDelay;
+                float ddl = delayL_[static_cast<std::size_t>(rd)], ddr = delayR_[static_cast<std::size_t>(rd)];
+                if (fadeDelay_ > 0)
+                {
+                    const int rp = (w - delayPrev_ + kMaxDelay) % kMaxDelay;
+                    const float k = static_cast<float>(fadeDelay_--) / kFade;
+                    ddl = ddl * (1 - k) + delayL_[static_cast<std::size_t>(rp)] * k;
+                    ddr = ddr * (1 - k) + delayR_[static_cast<std::size_t>(rp)] * k;
+                }
+                delayWrite_ = (w + 1) % kMaxDelay;
                 const float retL = rl[i], retR = rr[i];
-                auto mixFor = [&](int r, float& L, float& R, float& SL, float& SR) {
+                // In the Off route the wet stem carries nothing (no channel is routed), so the dry line is the mix.
+                auto mainFor = [&](int r, float& L, float& R) {
                     switch (static_cast<FilterRoute>(r))
                     {
-                    case FilterRoute::Off: L = ddl; R = ddr; SL = SR = 0; break;
-                    case FilterRoute::Channels: L = ddl + retL; R = ddr + retR; SL = wl[i]; SR = wr[i]; break;
-                    case FilterRoute::Master: L = retL; R = retR; SL = dl[i] + wl[i]; SR = dr[i] + wr[i]; break;
+                    case FilterRoute::Off: L = ddl; R = ddr; break;
+                    case FilterRoute::Channels: L = ddl + retL; R = ddr + retR; break;
+                    case FilterRoute::Master: L = retL; R = retR; break;
                     }
                 };
-                // In the Off route the wet stem carries nothing (no channel is routed), so the dry line is the mix.
-                float L = 0, R = 0, SL = 0, SR = 0;
-                mixFor(routeNow_, L, R, SL, SR);
-                if (fade_ > 0)
+                auto sendFor = [&](int r, float& L, float& R) {
+                    switch (static_cast<FilterRoute>(r))
+                    {
+                    case FilterRoute::Off: L = R = 0; break;
+                    case FilterRoute::Channels: L = wl[i]; R = wr[i]; break;
+                    case FilterRoute::Master: L = dl[i] + wl[i]; R = dr[i] + wr[i]; break;
+                    }
+                };
+                mainFor(routeMain_, outL, outR);
+                if (fadeMain_ > 0)
                 {
-                    float L0 = 0, R0 = 0, SL0 = 0, SR0 = 0;
-                    mixFor(routePrev_, L0, R0, SL0, SR0);
-                    const float k = static_cast<float>(fade_) / kFade;
-                    L = L * (1 - k) + L0 * k;
-                    R = R * (1 - k) + R0 * k;
-                    --fade_;
+                    float L0 = 0, R0 = 0;
+                    mainFor(mainPrev_, L0, R0);
+                    const float k = static_cast<float>(fadeMain_--) / kFade;
+                    outL = outL * (1 - k) + L0 * k;
+                    outR = outR * (1 - k) + R0 * k;
                 }
-                outL = L;
-                outR = R;
-                sendLv = SL;
-                sendRv = SR;
-                delayWrite_ = (w + 1) % kMaxDelay;
+                if (! measured)
+                {
+                    float SL = 0, SR = 0;
+                    sendFor(routeSend_, SL, SR);
+                    if (fadeSend_ > 0)
+                    {
+                        float SL0 = 0, SR0 = 0;
+                        sendFor(sendPrev_, SL0, SR0);
+                        const float k = static_cast<float>(fadeSend_--) / kFade;
+                        SL = SL * (1 - k) + SL0 * k;
+                        SR = SR * (1 - k) + SR0 * k;
+                    }
+                    sl[i] = SL;
+                    sr2[i] = SR;
+                }
             }
             else
             {
@@ -833,11 +1088,6 @@ void Player::process(const platform::AudioIO& io) noexcept
                 ml[i] = outL;
             if (mr != nullptr)
                 mr[i] = outR;
-            if (loop && measurePhase_ >= 2)
-            {
-                sl[i] = sendLv;
-                sr2[i] = sendRv;
-            }
         }
         // PHONES: the same mix.
         constexpr int kPh = static_cast<int>(platform::AudioPort::Phones);

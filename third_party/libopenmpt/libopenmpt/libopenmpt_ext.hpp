@@ -409,6 +409,32 @@ class interactive3 {
 
 }; // class interactive3
 
+/* Track16 addition (not upstream): position control without libopenmpt's seek simulation. */
+
+#ifndef LIBOPENMPT_EXT_INTERFACE_TRACK16_POSITION
+#define LIBOPENMPT_EXT_INTERFACE_TRACK16_POSITION
+#endif
+
+LIBOPENMPT_DECLARE_EXT_CXX_INTERFACE(track16_position)
+
+class track16_position {
+
+	LIBOPENMPT_EXT_CXX_INTERFACE(track16_position)
+
+	//! The position that will play after the current row (including the current row's jumps and pattern breaks once its first tick was rendered).
+	virtual void get_next_position( std::int32_t & order, std::int32_t & row ) const = 0;
+
+	//! Play (order, row) after the current row. Unlike openmpt::module::set_position_order_row, nothing is simulated from the song start (no allocation, constant time) and playing voices continue. Invalid positions are ignored (returns false).
+	virtual bool set_next_position( std::int32_t order, std::int32_t row ) = 0;
+
+	//! Start (order, row) with the next rendered sample, as set_next_position but without finishing the current row.
+	virtual bool jump_to_position( std::int32_t order, std::int32_t row ) = 0;
+
+	//! Back to order 0, row 0 with the module's initial speed, tempo and global volume; all voices reset.
+	virtual void rewind() = 0;
+
+}; // class track16_position
+
 
 
 /* add stuff here */

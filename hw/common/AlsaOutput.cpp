@@ -528,7 +528,7 @@ void AlsaOutput::stop()
 AudioStats AlsaOutput::stats() const noexcept
 {
     return {periodsDone_.load(std::memory_order_relaxed), xruns_.load(std::memory_order_relaxed), rate_, period_,
-            realtime_.load(std::memory_order_relaxed)};
+            realtime_.load(std::memory_order_relaxed), loopDrops_.load(std::memory_order_relaxed)};
 }
 
 void AlsaOutput::convert() noexcept

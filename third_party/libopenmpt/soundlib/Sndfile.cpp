@@ -993,6 +993,31 @@ void CSoundFile::SetCurrentOrder(ORDERINDEX nOrder)
 	m_PlayState.m_flags.reset(SONG_FADINGSONG | SONG_ENDREACHED);
 }
 
+// Track16 addition (not upstream).
+void CSoundFile::Track16SetNextPosition(ORDERINDEX order, ROWINDEX row, bool now)
+{
+	if(order != m_PlayState.m_nCurrentOrder)
+	{
+		for(auto &chn : m_PlayState.Chn)
+		{
+			chn.nPatternLoopCount = 0;
+			chn.nPatternLoop = 0;
+		}
+	}
+	m_PlayState.m_nNextOrder = order;
+	m_PlayState.m_nNextRow = row;
+	m_PlayState.m_nextPatStartRow = 0;
+	if(now)
+	{
+		m_PlayState.m_nTickCount = TICKS_ROW_FINISHED;
+		m_PlayState.m_nBufferCount = 0;
+		m_PlayState.m_dBufferDiff = 0;
+		m_PlayState.m_nPatternDelay = 0;
+		m_PlayState.m_nFrameDelay = 0;
+	}
+	m_PlayState.m_flags.reset(SONG_FADINGSONG | SONG_ENDREACHED);
+}
+
 void CSoundFile::SuspendPlugins()
 {
 #ifndef NO_PLUGINS

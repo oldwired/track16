@@ -1,11 +1,13 @@
 // Host test of the player engine: every module in the given folder through app::Player, with a simulated analog
 // filter loop (the send comes back on inputs 2/3 after kLoopDelay frames) and a recording MIDI scheduler.
-// Checks playback, the loop latency measurement, quantized jumps, the stutter loop, the filter routes, mutes, the Kit
-// pads, stop, and the MIDI clock and notes. Exit code 1 when a check fails.
+// Checks playback, the loop latency measurement (and a re-measurement), quantized jumps, the stutter loop and its
+// return in time, the filter routes, stale pad releases, mutes, the Kit pads, stop, and the MIDI clock and notes.
+// Exit code 1 when a check fails.
 #include "app/Library.h"
 #include "app/Player.h"
 #include "app/Song.h"
 
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -77,6 +79,7 @@ struct Rig
     {
         player.setMidi(&midi);
         player.prepare(kRate, kPeriod);
+        player.armMeasure(); // no lamps here
         for (int i = 0; i < 12; ++i)
             outPtr[i] = out[static_cast<std::size_t>(i)].data();
         // No OUT 3-8 in the test; the send only with the loop.
@@ -132,14 +135,39 @@ struct Rig
         run(seconds);
         return std::sqrt(energy / (2.0 * seconds * kRate));
     }
-    void pad(int pad0, int velocity = 100) { player.push({static_cast<std::uint8_t>(pad0), static_cast<std::uint8_t>(velocity), 60, static_cast<std::int8_t>(pad0)}); }
+    std::array<std::uint16_t, 16> hits {}; // as the screen counts them
+    void pad(int pad0, int velocity = 100)
+    {
+        ++hits[static_cast<std::size_t>(pad0)];
+        player.push({static_cast<std::uint8_t>(pad0), static_cast<std::uint8_t>(velocity), 60, static_cast<std::int8_t>(pad0)});
+    }
+    void release(int pad0) { player.padRelease(pad0, hits[static_cast<std::size_t>(pad0)]); }
 };
+
+// Where `rows` rows after (order, row) is, in plain order (the player's idea of "where the song would be").
+void advance(const SongData& d, int& order, int& row, long rows)
+{
+    auto valid = [&](int o) {
+        for (int k = 0; k < 2 * d.numOrders + 2; ++k)
+        {
+            if (o < 0 || o >= d.numOrders || d.orderPattern(o) == -2)
+                o = 0;
+            if (d.orderPattern(o) >= 0)
+                return o;
+            ++o;
+        }
+        return 0;
+    };
+    for (; rows > 0; --rows)
+        if (++row >= d.patternRows(d.orderPattern(order)))
+            order = valid(order + 1), row = 0;
+}
 
 void testModule(const LibraryEntry& e)
 {
     std::printf("== %s/%s\n", e.folder.c_str(), e.name.c_str());
     std::string error;
-    auto song = loadSong(e.path, true, 100, 4, error);
+    auto song = loadSong(e.path, true, kRate, 100, 4, error);
     CHECK(song != nullptr, "load: %s", error.c_str());
     if (! song)
         return;
@@ -192,10 +220,12 @@ void testModule(const LibraryEntry& e)
         std::printf("  jump: order %d row %d\n", rig.player.position().order, rig.player.position().row);
     }
 
-    // The stutter loop: pad 4 = 4 rows.
+    // The stutter loop: pad 4 = 4 rows; released, the song goes on where it would be (no MIDI stop/continue).
     rig.player.padMode = static_cast<int>(PadMode::Loop);
     rig.run(0.02);
     const auto start = rig.player.position();
+    const long rows0 = rig.rowsSeen;
+    const int stops0 = rig.midi.count(0xFC);
     rig.pad(3);
     int minRow = 1 << 20, maxRow = -1;
     bool sameOrder = true;
@@ -210,13 +240,32 @@ void testModule(const LibraryEntry& e)
     CHECK(rig.player.loopActive(), "loop not active");
     CHECK(sameOrder && minRow >= start.row && maxRow < start.row + 4, "loop rows %d…%d from %d (order kept %d)", minRow, maxRow,
           start.row, sameOrder ? 1 : 0);
-    rig.player.padRelease(3);
-    rig.run(0.02);
+    rig.release(3);
+    const auto inLoop = rig.player.position();
+    for (int k = 0; k < 200 && rig.player.position().order == inLoop.order && rig.player.position().row == inLoop.row; ++k)
+        rig.run(0.005);
     const auto after = rig.player.position();
+    int wantOrder = start.order, wantRow = start.row;
+    advance(*data, wantOrder, wantRow, rig.rowsSeen - rows0);
     CHECK(! rig.player.loopActive(), "loop still active");
-    CHECK(after.order != start.order || after.row >= start.row + 4, "released at order %d row %d, loop was %d/%d", after.order, after.row,
-          start.order, start.row);
-    std::printf("  loop: rows %d…%d, released to order %d row %d\n", minRow, maxRow, after.order, after.row);
+    CHECK(after.order == wantOrder && after.row == wantRow, "released to order %d row %d, the song would be at %d/%d", after.order,
+          after.row, wantOrder, wantRow);
+    CHECK(rig.midi.count(0xFC) == stops0, "MIDI stop during the loop");
+    std::printf("  loop: rows %d…%d, released to order %d row %d after %ld rows\n", minRow, maxRow, after.order, after.row,
+                rig.rowsSeen - rows0);
+
+    // A jump on the next row: no extra clock pulses (the follower stays on the row grid).
+    rig.rowsSeen = 0;
+    const int clocks0 = rig.midi.count(0xF8);
+    if (target >= 0)
+    {
+        rig.player.jump(target, Quantize::Now);
+        rig.run(1.0);
+        CHECK(rig.player.position().order == target || rig.player.position().order == target + 1 || rig.player.position().row > 0,
+              "jump now: at %d/%d", rig.player.position().order, rig.player.position().row);
+        const int pulses = rig.midi.count(0xF8) - clocks0;
+        CHECK(std::abs(pulses - 6 * rig.rowsSeen) <= 6, "clock pulses %d for %ld rows around a jump", pulses, rig.rowsSeen);
+    }
 
     // The filter routes, from the start of the song (some end in silence).
     rig.player.jump(0, Quantize::Now);
@@ -226,7 +275,12 @@ void testModule(const LibraryEntry& e)
     const double filtered = rig.rms(1.0);
     CHECK(rig.player.route() == FilterRoute::Channels, "route %d with channel 1 held", static_cast<int>(rig.player.route()));
     CHECK(rig.player.filterChannels() == 1, "filter mask %llx", static_cast<unsigned long long>(rig.player.filterChannels()));
-    rig.player.padRelease(0);
+    // A release that arrives after the pad was hit again (the UI passes releases on late) keeps the newer hit.
+    rig.pad(0);
+    rig.player.padRelease(0, rig.hits[0] - 1);
+    rig.run(0.05);
+    CHECK(rig.player.filterChannels() == 1, "a stale release ended the newer hit");
+    rig.release(0);
     rig.run(0.05);
     CHECK(rig.player.route() == FilterRoute::Off, "route after release %d", static_cast<int>(rig.player.route()));
     rig.player.masterFilter = true;
@@ -251,7 +305,7 @@ void testModule(const LibraryEntry& e)
         rig.pad(p, 120);
     rig.run(0.5);
     for (int p = 0; p < 4; ++p)
-        rig.player.padRelease(p);
+        rig.release(p);
     rig.run(0.2);
     CHECK(rig.finite, "non-finite after Kit");
 
@@ -261,7 +315,17 @@ void testModule(const LibraryEntry& e)
     rig.run(4.0);
     const int notes = rig.midi.count(0x90, 0xF0) - before;
     rig.player.midiNotes = false;
+    rig.run(0.05);
+    CHECK(rig.midi.count(0x90, 0xF0) == rig.midi.count(0x80, 0xF0), "REC off left notes on (%d on, %d off)", rig.midi.count(0x90, 0xF0),
+          rig.midi.count(0x80, 0xF0));
     std::printf("  midi: %d note-ons in 4 s, %d clocks total\n", notes, rig.midi.count(0xF8));
+
+    // A re-measurement of the loop (no route on): same latency, the song plays on.
+    const int measured = rig.player.measurements();
+    rig.player.remeasure();
+    rig.run(0.5);
+    CHECK(rig.player.measurements() == measured + 1 && rig.player.latencyFrames() == kLoopDelay, "re-measured %d times, latency %d",
+          rig.player.measurements() - measured, rig.player.latencyFrames());
 
     // MIDI timestamps never go backwards by more than the latency window.
     bool ordered = true;
@@ -281,8 +345,8 @@ void testModule(const LibraryEntry& e)
 
     // The hand-over: a second song replaces the first, the first comes back for deletion.
     std::string error2;
-    auto again = loadSong(e.path, true, 100, 4, error2);
-    auto third = loadSong(e.path, true, 100, 4, error2);
+    auto again = loadSong(e.path, true, kRate, 100, 4, error2);
+    auto third = loadSong(e.path, true, kRate, 100, 4, error2);
     CHECK(rig.player.load(std::move(again)), "second hand-over");
     CHECK(! rig.player.load(std::move(third)) && third != nullptr, "a hand-over while one is pending must keep the song");
     rig.run(0.02);
@@ -296,7 +360,7 @@ void testNoLoop(const LibraryEntry& e)
     rig.run(0.05);
     CHECK(! rig.player.stems(), "stems without a loop");
     std::string error;
-    auto song = loadSong(e.path, rig.player.stems(), 100, 4, error);
+    auto song = loadSong(e.path, rig.player.stems(), kRate, 100, 4, error);
     CHECK(song && ! song->wet, "load without stems");
     rig.player.load(std::move(song));
     rig.player.play();

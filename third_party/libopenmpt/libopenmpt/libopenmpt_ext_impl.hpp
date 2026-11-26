@@ -22,6 +22,7 @@ class module_ext_impl
 	, public ext::interactive
 	, public ext::interactive2
 	, public ext::interactive3
+	, public ext::track16_position
 
 
 
@@ -114,6 +115,22 @@ public:
 	double get_note_finetune( std::int32_t channel ) override;
 
 	void set_current_tempo2(double tempo) override;
+
+	// track16_position
+
+	void get_next_position( std::int32_t & order, std::int32_t & row ) const override;
+
+	bool set_next_position( std::int32_t order, std::int32_t row ) override;
+
+	bool jump_to_position( std::int32_t order, std::int32_t row ) override;
+
+	void rewind() override;
+
+private:
+
+	bool valid_position( std::int32_t order, std::int32_t row ) const;
+
+public:
 
 	/* add stuff here */
 

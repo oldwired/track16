@@ -87,6 +87,8 @@ namespace openmpt {
 			return dynamic_cast< ext::interactive2 * >( this );
 		} else if ( interface_id == ext::interactive3_id ) {
 			return dynamic_cast< ext::interactive3 * >( this );
+		} else if ( interface_id == ext::track16_position_id ) {
+			return dynamic_cast< ext::track16_position * >( this );
 
 
 
@@ -351,6 +353,46 @@ namespace openmpt {
 			throw openmpt::exception("invalid tempo");
 		}
 		m_sndFile->m_PlayState.m_nMusicTempo = decltype( m_sndFile->m_PlayState.m_nMusicTempo )( tempo );
+	}
+
+
+	// track16_position (Track16 addition, not upstream)
+
+	bool module_ext_impl::valid_position( std::int32_t order, std::int32_t row ) const {
+		if ( order < 0 || order >= static_cast<std::int32_t>( m_sndFile->Order().GetLengthTailTrimmed() ) ) {
+			return false;
+		}
+		const OpenMPT::PATTERNINDEX pattern = m_sndFile->Order()[order];
+		if ( !m_sndFile->Patterns.IsValidPat( pattern ) ) {
+			return false;
+		}
+		return row >= 0 && row < static_cast<std::int32_t>( m_sndFile->Patterns[pattern].GetNumRows() );
+	}
+
+	void module_ext_impl::get_next_position( std::int32_t & order, std::int32_t & row ) const {
+		order = static_cast<std::int32_t>( m_sndFile->m_PlayState.m_nNextOrder );
+		row = static_cast<std::int32_t>( m_sndFile->m_PlayState.m_nNextRow );
+	}
+
+	bool module_ext_impl::set_next_position( std::int32_t order, std::int32_t row ) {
+		if ( !valid_position( order, row ) ) {
+			return false;
+		}
+		m_sndFile->Track16SetNextPosition( static_cast<OpenMPT::ORDERINDEX>( order ), static_cast<OpenMPT::ROWINDEX>( row ), false );
+		return true;
+	}
+
+	bool module_ext_impl::jump_to_position( std::int32_t order, std::int32_t row ) {
+		if ( !valid_position( order, row ) ) {
+			return false;
+		}
+		m_sndFile->Track16SetNextPosition( static_cast<OpenMPT::ORDERINDEX>( order ), static_cast<OpenMPT::ROWINDEX>( row ), true );
+		return true;
+	}
+
+	void module_ext_impl::rewind() {
+		m_sndFile->ResetPlayPos();
+		m_currentPositionSeconds = 0.0;
 	}
 
 	/* add stuff here */

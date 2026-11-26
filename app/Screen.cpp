@@ -387,10 +387,18 @@ Screen::Screen(Player& player, Midi& midi, ScreenConfig config) : player_(player
     padHitMs_.fill(-1e9);
     setView(View::Library);
     setSize(kWidth, kHeight);
+    loader_ = std::thread([this] { loaderThread(); });
 }
 
 Screen::~Screen()
 {
+    {
+        std::lock_guard<std::mutex> lock(loadMutex_);
+        loadQuit_ = true;
+    }
+    loadWake_.notify_all();
+    if (loader_.joinable())
+        loader_.join();
     canvas_->deleteAllChildren();
     setLookAndFeel(nullptr);
 }
@@ -427,31 +435,69 @@ void Screen::loadEntry(int index, bool play)
     const auto& list = library_.entries();
     if (index < 0 || index >= static_cast<int>(list.size()))
         return;
-    std::string error;
-    const double t0 = nowMs();
-    auto song = loadSong(list[static_cast<std::size_t>(index)].path, player_.stems(), config_.stereoSeparation, config_.interpolation, error);
-    if (! song)
     {
-        event("LOAD FAILED: " + juce::String::fromUTF8(error.c_str()));
-        logLine("LOAD FAILED %s: %s", list[static_cast<std::size_t>(index)].path.c_str(), error.c_str());
+        std::lock_guard<std::mutex> lock(loadMutex_);
+        loadJob_ = {index, list[static_cast<std::size_t>(index)].path, play, player_.stems(), player_.sampleRate()};
+        loadWanted_ = true; // a newer request replaces one that has not started
+    }
+    loadWake_.notify_all();
+    browser_->select(index);
+    event("LOADING " + juce::String::fromUTF8(list[static_cast<std::size_t>(index)].name.c_str()));
+}
+
+void Screen::loaderThread()
+{
+    nameThisThread("loader");
+    std::unique_lock<std::mutex> lock(loadMutex_);
+    for (;;)
+    {
+        loadWake_.wait(lock, [this] { return loadQuit_ || loadWanted_; });
+        if (loadQuit_)
+            return;
+        auto result = std::make_unique<Loaded>();
+        result->job = loadJob_;
+        loadWanted_ = false;
+        lock.unlock();
+        const double t0 = nowMs();
+        result->song = loadSong(result->job.path, result->job.stems, result->job.sampleRate, config_.stereoSeparation,
+                                config_.interpolation, result->error);
+        result->ms = nowMs() - t0;
+        lock.lock();
+        loaded_ = std::move(result); // replaces a result frame() has not taken yet (a newer pick wins)
+    }
+}
+
+// The loader's result (message thread, once per frame).
+void Screen::takeLoaded()
+{
+    std::unique_ptr<Loaded> r;
+    {
+        std::lock_guard<std::mutex> lock(loadMutex_);
+        r = std::move(loaded_);
+    }
+    if (! r)
+        return;
+    if (! r->song)
+    {
+        event("LOAD FAILED: " + juce::String::fromUTF8(r->error.c_str()));
+        logLine("LOAD FAILED %s: %s", r->job.path.c_str(), r->error.c_str());
         return;
     }
-    const auto& d = *song->data;
+    const auto& d = *r->song->data;
     logLine("LOAD %s \"%s\" %s, %d ch, %d orders, %d patterns, %d instruments, %.0f s, stems=%d (%.0f ms)", d.path.c_str(),
             d.title.c_str(), d.type.c_str(), d.channels, d.numOrders, d.numPatterns, std::max(d.numInstruments, d.numSamples),
-            d.durationSeconds, song->wet ? 1 : 0, nowMs() - t0);
-    pending_ = std::move(song);
-    pendingPlay_ = play;
-    playingIndex_ = index;
-    browser_->playing = index;
-    browser_->select(index);
+            d.durationSeconds, r->song->wet ? 1 : 0, r->ms);
+    event("LOADED " + juce::String::fromUTF8(d.title.c_str()));
+    r->song->playOnAdopt = r->job.play;
+    pending_ = std::move(r->song); // replaces one the player has not taken yet
+    playingIndex_ = r->job.index;
+    browser_->playing = r->job.index;
     mutes_ = solos_ = 0;
     player_.muteMask = 0;
     player_.soloMask = 0;
     player_.page = 0;
     player_.instrument = 0;
     orderPage_ = 0;
-    event("LOADED " + juce::String::fromUTF8(d.title.c_str()));
 }
 
 int Screen::pageCount() const
@@ -480,6 +526,7 @@ void Screen::setPadMode(PadMode mode, bool samePressed)
 
 void Screen::padPress(int pad0, int velocity, bool fromReader, double nowMs)
 {
+    ++padHits_[static_cast<std::size_t>(pad0)]; // the player counted this hit in push() (the reader's, or ours below)
     padsHeld_ |= 1ull << pad0;
     padHitMs_[static_cast<std::size_t>(pad0)] = nowMs;
     if (! fromReader) // touch, scripts: no reader thread told the player
@@ -523,7 +570,7 @@ void Screen::padPress(int pad0, int velocity, bool fromReader, double nowMs)
 void Screen::padRelease(int pad0, double)
 {
     padsHeld_ &= ~(1ull << pad0);
-    player_.padRelease(pad0);
+    player_.padRelease(pad0, padHits_[static_cast<std::size_t>(pad0)]);
 }
 
 bool Screen::handle(const io::ControlEvent& e, double nowMs)
@@ -686,7 +733,7 @@ bool Screen::handle(const io::ControlEvent& e, double nowMs)
     {
         const int q = static_cast<int>(e.control) - static_cast<int>(C::Bar1);
         player_.quantize = q;
-        static const char* const names[] = {"JUMPS AT PATTERN END", "JUMPS ON THE BEAT", "JUMPS AT ONCE"};
+        static const char* const names[] = {"JUMPS AT PATTERN END", "JUMPS ON THE BEAT", "JUMPS ON THE NEXT ROW"};
         event(names[q]);
         break;
     }
@@ -744,14 +791,23 @@ void Screen::frame(double nowMs, float fps)
 {
     lastFrameMs_ = nowMs;
     player_.collect();
+    takeLoaded();
+    if (const int m = player_.measurements(); m != lastMeasurements_)
+    {
+        lastMeasurements_ = m;
+        const int frames = player_.latencyFrames();
+        const bool ok = player_.latencyMeasured();
+        logLine("FILTER LOOP latency %d frames (%.1f ms) %s", frames, 1000.0 * frames / std::max(1, player_.sampleRate()),
+                ok ? "measured" : "FALLBACK: no click came back");
+        event(ok ? "FILTER LOOP " + juce::String(frames) + " FRAMES"
+                 : "FILTER LOOP: NO RETURN, GUESSING " + juce::String(frames) + " FRAMES (LP CUTOFF CLOSED?)");
+    }
     if (pending_)
     {
         std::shared_ptr<const SongData> data = pending_->data;
-        if (player_.load(std::move(pending_)))
+        if (player_.load(std::move(pending_))) // the player starts it itself when it should play (Song::playOnAdopt)
         {
             song_ = std::move(data);
-            if (pendingPlay_)
-                player_.play();
             context_->set(context_->title, juce::String::fromUTF8(song_->title.c_str()));
             char info[160];
             std::snprintf(info, sizeof info, "%s · %d CH · %d ORD · %d:%02d", juce::String(song_->type).toUpperCase().toRawUTF8(),

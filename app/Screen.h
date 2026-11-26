@@ -6,7 +6,8 @@
 //   body          PLAYER: the rain (GL, see buildRain) · LIBRARY: the module list on the stick
 //   knob strip    TEMPO, PITCH, STEREO, INTERP, GAIN, VIEW (knobs 1–6)
 //
-// Controls (handle()): see the mapping in the README. Main thread only.
+// Controls (handle()): see the mapping in the README. Main thread only, except the loader thread, which reads and
+// parses modules (loadSong) so the screen and the pad releases never wait for a load.
 #pragma once
 
 #include "app/Library.h"
@@ -18,10 +19,13 @@
 #include <juce_gui_basics/juce_gui_basics.h>
 
 #include <array>
+#include <condition_variable>
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace app
@@ -87,7 +91,9 @@ private:
     enum class Density { Auto, Full, Medium, Compact, Rain };
 
     void setView(View);
-    void loadEntry(int index, bool play);
+    void loadEntry(int index, bool play); // asks the loader thread; frame() takes the result
+    void loaderThread();
+    void takeLoaded();
     void setPadMode(PadMode mode, bool samePressed);
     int pageCount() const;
     void padPress(int pad0, int velocity, bool fromReader, double nowMs);
@@ -109,8 +115,30 @@ private:
     Density density_ = Density::Auto;
     std::shared_ptr<const SongData> song_;
     std::unique_ptr<Song> pending_; // waiting for the player to take it
-    bool pendingPlay_ = false;
     int playingIndex_ = -1;
+    // the loader thread
+    struct LoadJob
+    {
+        int index = -1;
+        std::string path;
+        bool play = false, stems = false;
+        int sampleRate = 44100;
+    };
+    struct Loaded
+    {
+        LoadJob job;
+        std::unique_ptr<Song> song;
+        std::string error;
+        double ms = 0;
+    };
+    std::thread loader_;
+    std::mutex loadMutex_;
+    std::condition_variable loadWake_;
+    bool loadQuit_ = false, loadWanted_ = false;
+    LoadJob loadJob_;
+    std::unique_ptr<Loaded> loaded_;
+    int lastMeasurements_ = 0;
+    std::array<std::uint16_t, 16> padHits_ {}; // presses per pad, as the player counts them (Player::push)
     bool shift_ = false;
     int orderPage_ = 0, touchRow_ = -1;
     std::uint64_t mutes_ = 0, solos_ = 0;

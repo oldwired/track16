@@ -5,8 +5,8 @@
 // Stems: with the analog filter loop present the song has a second instance of the same module ("wet"). Both play in
 // lockstep with complementary channel masks; the wet one carries the channels that go through the filter.
 //
-// Loading (loadSong) runs on the message thread; the Song is then handed to the audio thread (Player::load) and
-// handed back for deletion (Player::collect).
+// Loading (loadSong) runs on the screen's loader thread; the Song is then handed to the audio thread (Player::load)
+// and handed back for deletion (Player::collect) on the message thread.
 #pragma once
 
 #include <cstdint>
@@ -21,6 +21,7 @@ namespace ext
 {
 class interactive;
 class interactive2;
+class track16_position;
 } // namespace ext
 } // namespace openmpt
 
@@ -83,13 +84,17 @@ struct Song
     openmpt::ext::interactive* dryI = nullptr;
     openmpt::ext::interactive* wetI = nullptr;
     openmpt::ext::interactive2* dryI2 = nullptr;
+    openmpt::ext::track16_position* dryP = nullptr; // seeks without libopenmpt's simulation (third_party/libopenmpt)
+    openmpt::ext::track16_position* wetP = nullptr;
+    bool playOnAdopt = false; // the player starts it when it takes it over
     Song();
     ~Song();
 };
 
-// Reads and parses a module file (message thread). `stems`: create the second ("wet") instance as well.
+// Reads and parses a module file (any thread but the audio thread). `stems`: create the second ("wet") instance as
+// well. `sampleRate`: the mixer is set up for it here, so the audio thread's first read does no setup work.
 // Null + error on failure.
-std::unique_ptr<Song> loadSong(const std::string& path, bool stems, int stereoSeparation, int interpolation, std::string& error);
+std::unique_ptr<Song> loadSong(const std::string& path, bool stems, int sampleRate, int stereoSeparation, int interpolation, std::string& error);
 
 // True for file names libopenmpt is likely to play (by extension; the loader decides).
 bool looksLikeModule(const std::string& fileName);

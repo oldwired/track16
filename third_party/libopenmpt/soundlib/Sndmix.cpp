@@ -584,7 +584,9 @@ bool CSoundFile::ProcessRow()
 		// But: We will not mark the row as modified if the song is not in loop mode but
 		// the pattern loop (editor flag, not to be confused with the pattern loop effect)
 		// flag is set - because in that case, the module would stop after the first pattern loop...
-		const bool overrideLoopCheck = (m_nRepeatCount != -1) && m_PlayState.m_flags[SONG_PATTERNLOOP];
+		// Track16 (not upstream): with endless repetition (repeat count -1) a revisited row only resets the visitor, so
+		// skip the check; this keeps jumps back (Track16's stutter loop) free of the visitor's reset and its allocations.
+		const bool overrideLoopCheck = (m_nRepeatCount == -1) || ((m_nRepeatCount != -1) && m_PlayState.m_flags[SONG_PATTERNLOOP]);
 		if(!overrideLoopCheck && m_visitedRows.Visit(m_PlayState.m_nCurrentOrder, m_PlayState.m_nRow, m_PlayState.Chn, ignoreRow))
 		{
 			if(m_nRepeatCount)

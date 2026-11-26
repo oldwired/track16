@@ -10,7 +10,19 @@
 Only what the library build needs is kept: `common/`, `soundlib/`, `sounddsp/`, `src/`, the top-level files of
 `libopenmpt/`, `include/{miniz,minimp3,stb_vorbis}/`, `build/svn_version/` and `build/dist.mk` (version
 information), plus `LICENSE` and `README.md`. Not kept: `test/`, `examples/`, `openmpt123/`, `contrib/`, `doc/`,
-the player plugins and bindings. The files are unmodified.
+the player plugins and bindings.
+
+## Track16 changes
+
+Marked "Track16" in the source; reapply them after an update.
+
+- `libopenmpt/libopenmpt_ext.hpp`, `libopenmpt_ext_impl.hpp/.cpp`: the extension interface `track16_position`
+  (`get_next_position`, `set_next_position`, `jump_to_position`, `rewind`): position changes without
+  `set_position_order_row`'s seek, which simulates the song from its start (and allocates) on every call.
+- `soundlib/Sndfile.h/.cpp`: `CSoundFile::Track16SetNextPosition`, which the interface uses (PlayState's fields are
+  only open to CSoundFile).
+- `soundlib/Sndmix.cpp` (`ProcessRow`): with endless repetition (repeat count −1) the visited-rows check is skipped.
+  It only reset the visitor there, but that reset allocates, and the stutter loop revisits rows many times a second.
 
 Built by [`cmake/libopenmpt.cmake`](../../cmake/libopenmpt.cmake), which follows the source lists of libopenmpt's
 Makefile.
