@@ -610,10 +610,11 @@ void AlsaOutput::convert() noexcept
             continue;
         std::int16_t* out = interleaved_.data();
         const auto li = static_cast<std::size_t>(port.left), ri = static_cast<std::size_t>(port.right);
+        const float g = device_.mainGain;
         for (unsigned i = 0; i < period_; ++i, out += ch)
         {
-            out[li] = toS16(l[i]);
-            out[ri] = toS16(r[i]);
+            out[li] = toS16(l[i] * g);
+            out[ri] = toS16(r[i] * g);
         }
     }
 }

@@ -185,7 +185,7 @@ svg text { font-family: var(--display); }
   add({ id: 'hp', g: 'filter', s: ['c', 865, 165, 32], name: 'HIGH PASS CUTOFF', tag: 'HP · ANALOG',
     act: 'Sets the analog high-pass on the filter board: Track16 writes the knob position to the board\'s cutoff DAC.', knob: true });
   add({ id: 'active', g: 'filter', s: ['c', 978, 168, 20], name: 'ANALOG FILTER ACTIVE', tag: 'WHOLE MIX',
-    act: 'Puts the analog filter in the main output\'s path: the whole mix is filtered on its way to MAIN OUT, with no delay (PHONES stays unfiltered). Off: the main output is clean and only FILTER pads use the filter, through its send/return loop.', sh: 'Clears with SHIFT + STOP.',
+    act: 'Puts the analog filter in the main output\'s path: the whole mix is filtered on its way to MAIN OUT, with no delay (PHONES stays unfiltered). Held FILTER pads then take their channels out of the filter. Off: the main output is clean and only FILTER pads use the filter, through its send/return loop.', sh: 'Clears with SHIFT + STOP.',
     lamp: 'Lit while any audio goes through the filter (whole mix or FILTER pads), and for a moment at start while Track16 measures the filter loop.' });
 
   add({ id: 'smode', g: 'sound', s: ['r', 124, 268, 76, 44, 6], name: 'MODE (touch strip)', tag: 'NEXT MODE',
@@ -269,8 +269,8 @@ svg text { font-family: var(--display); }
     const i = n - 1;
     switch (state.mode) {
       case 'filter': return { label: 'CH ' + n, sub: state.shift ? 'LATCH' : 'HOLD: FILTER',
-        act: `Hold: channel ${n} goes through the analog filter while held.`, sh: 'SHIFT + pad: keep the channel on the filter (latch); again to release.',
-        lamp: 'Red: through the filter (slow blink: latched). Otherwise the channel\'s colour, brighter while it plays.' };
+        act: `Hold: channel ${n} goes through the analog filter while held. With ANALOG FILTER ACTIVE on it is the other way round: the held channel stays clean and every other channel is filtered.`, sh: 'SHIFT + pad: keep it that way (latch); again to release.',
+        lamp: 'Red: through the filter. White: kept clean while ACTIVE is on. Slow blink: latched. Otherwise the channel\'s colour, brighter while it plays.' };
       case 'mute': return { label: 'CH ' + n, sub: state.shift ? 'SOLO' : 'MUTE',
         act: `Mute channel ${n} on/off.`, sh: 'SHIFT + pad: solo on/off.', lamp: 'Faint: muted. White: solo. Otherwise the channel\'s colour, brighter while it plays.' };
       case 'loop':

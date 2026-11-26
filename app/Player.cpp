@@ -800,7 +800,9 @@ void Player::applyMasks() noexcept
     const std::uint64_t solo = soloMask.load(std::memory_order_relaxed);
     const std::uint64_t muted = muteMask.load(std::memory_order_relaxed) | (solo != 0 ? ~solo : 0);
     const bool split = song_->wet != nullptr && stems_.load(std::memory_order_relaxed);
-    const std::uint64_t routed = split ? (filterHeld_ | filterLatchBits_) : 0;
+    const std::uint64_t picked = filterHeld_ | filterLatchBits_;
+    const std::uint64_t all = data_->channels >= 64 ? ~0ull : (1ull << std::max(0, data_->channels)) - 1;
+    const std::uint64_t routed = ! split ? 0 : filterInverse_ ? (all & ~picked) : picked;
     const std::uint64_t dry = muted | routed, wet = muted | ~routed;
     const int n = std::min(data_->channels, kMaxChannels);
     for (int c = 0; c < n; ++c)
@@ -997,11 +999,28 @@ void Player::process(const platform::AudioIO& io) noexcept
         delayNow_ = delayWant;
         fadeDelay_ = kFade;
     }
+    // ACTIVE: the whole mix through the board's main path (Master). With FILTER pads held as well the picked channels
+    // stay clean: the select line goes back to the loop and every other channel goes round it (Channels, inverted).
     int route = static_cast<int>(FilterRoute::Off);
+    bool inverse = false;
     if (loop && ! measuringNow)
-        route = masterFilter.load(std::memory_order_relaxed) ? static_cast<int>(FilterRoute::Master)
-              : (filterHeld_ | filterLatchBits_) != 0 && song_ != nullptr && song_->wet ? static_cast<int>(FilterRoute::Channels)
-                                                                                           : static_cast<int>(FilterRoute::Off);
+    {
+        const bool picked = (filterHeld_ | filterLatchBits_) != 0 && song_ != nullptr && song_->wet;
+        if (masterFilter.load(std::memory_order_relaxed))
+        {
+            route = static_cast<int>(picked ? FilterRoute::Channels : FilterRoute::Master);
+            inverse = picked;
+        }
+        else if (picked)
+            route = static_cast<int>(FilterRoute::Channels);
+    }
+    if (inverse != filterInverse_)
+    {
+        filterInverse_ = inverse;
+        masksDirty_ = true;
+        applyMasks();
+        masksDirty_ = false;
+    }
     if (! loop)
     {
         routeSend_ = routeMain_ = route;
@@ -1030,6 +1049,7 @@ void Player::process(const platform::AudioIO& io) noexcept
         driveLeft_ = 100;
     }
     const float volumeSmooth = static_cast<float>(1.0 / (0.005 * sampleRate_)); // the strip's volume glides over ~5 ms
+    const float ceiling = 1.0f / outputGain_;
     const int overHoldFrames = static_cast<int>(0.5 * sampleRate_);
 
     const float volume = mainVolume.load(std::memory_order_relaxed);
@@ -1164,7 +1184,7 @@ void Player::process(const platform::AudioIO& io) noexcept
                     dacPeak = std::max(std::fabs(SL), std::fabs(SR)) / returnGain_; // the send DAC runs at 1 / returnGain_
                 }
                 if (routeMain_ == static_cast<int>(FilterRoute::Master) || (fadeMain_ > 0 && mainPrev_ == static_cast<int>(FilterRoute::Master)))
-                    dacPeak = std::max(dacPeak, std::max(std::fabs(outL), std::fabs(outR)) * gain * volumeNow_);
+                    dacPeak = std::max(dacPeak, std::max(std::fabs(outL), std::fabs(outR)) * gain * volumeNow_ * outputGain_);
             }
             else
             {
@@ -1182,8 +1202,9 @@ void Player::process(const platform::AudioIO& io) noexcept
                     --overHold_;
             }
             volumeNow_ += (stripVolume_ - volumeNow_) * volumeSmooth;
-            outL = softClip(outL * gain * volumeNow_);
-            outR = softClip(outR * gain * volumeNow_);
+            // The soft clip at the DAC's full scale (1 / outputGain_ in engine units: 2 = +6 dB of headroom).
+            outL = softClip(outL * gain * volumeNow_ * outputGain_) * ceiling;
+            outR = softClip(outR * gain * volumeNow_ * outputGain_) * ceiling;
             peakL = std::max(peakL, std::fabs(outL));
             peakR = std::max(peakR, std::fabs(outR));
             if (ml != nullptr)

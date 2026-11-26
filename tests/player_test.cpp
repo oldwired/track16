@@ -289,6 +289,21 @@ void testModule(const LibraryEntry& e)
     const double master = rig.rms(1.0);
     CHECK(rig.player.route() == FilterRoute::Master, "master route");
     CHECK(master > 1e-4, "master route silent");
+    // ACTIVE with a FILTER pad held: the held channel stays clean, every other channel goes round the loop.
+    rig.pad(0);
+    rig.sendEnergy = 0;
+    rig.run(0.5);
+    CHECK(rig.player.route() == FilterRoute::Channels, "inverse: route %d", static_cast<int>(rig.player.route()));
+    if (rig.sendEnergy == 0) // nothing sent: only fine while the other channels are silent
+    {
+        float others = 0;
+        for (int c = 1; c < data->channels; ++c)
+            others = std::max(others, rig.player.channelLevel(c));
+        CHECK(others < 0.01f, "inverse: nothing sent while other channels play (%.3f)", static_cast<double>(others));
+    }
+    rig.release(0);
+    rig.run(0.05);
+    CHECK(rig.player.route() == FilterRoute::Master, "inverse released: route %d", static_cast<int>(rig.player.route()));
     rig.player.masterFilter = false;
     rig.run(0.05);
     std::printf("  filter: channels rms %.3f, master rms %.3f\n", filtered, master);

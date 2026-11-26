@@ -1161,8 +1161,9 @@ void Screen::lamps(io::LampFrame& f, double) const
             {
                 const float level = player_.channelLevel(index);
                 const bool muted = (mutes_ & bit(index)) || (solos_ != 0 && ! (solos_ & bit(index)));
-                if (mode == PadMode::Filter && (filtered & bit(index)))
-                    s = {(latched & bit(index)) && ! down ? LampMode::BlinkSlow : LampMode::On, io::lampcolour::red, 0};
+                if (mode == PadMode::Filter && (filtered & bit(index))) // red: filtered; white: kept clean under ACTIVE
+                    s = {(latched & bit(index)) && ! down ? LampMode::BlinkSlow : LampMode::On,
+                         player_.masterFilter.load() ? io::lampcolour::white : io::lampcolour::red, 0};
                 else if (mode == PadMode::Mute && (solos_ & bit(index)))
                     s = {LampMode::On, io::lampcolour::white, 0};
                 else if (muted)

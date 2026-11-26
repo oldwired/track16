@@ -17,6 +17,7 @@
 //   midi_out=all|din|usb|none   midi_clock=0|1  midi_notes=0|1  midi_offset_ms=<ms>
 //   filter_latency=<frames>     the analog filter loop's latency (default: measured at start)
 //   filter_send_gain=<0…1>      the filter send's fixed gain (default 0.5, −6 dB; the return is brought back by 1/gain)
+//   main_gain=<0.1…1>           the main DAC's fixed gain (default 0.5, −6 dB as the stock firmware: headroom for DRIVE)
 // and passes the rest to the platform (audio_period, audio_periods, filter_loop, …: hw/imx6/Imx6Platform.cpp).
 #include "app/GlDisplay.h"
 #include "app/Log.h"
@@ -61,7 +62,7 @@ platform::Settings loadSettings(const std::string& file)
     platform::Settings s {{"audio", "1"}, {"midi", "1"}, {"stat", "10"}, {"filter_loop", "1"}, {"audio_period", "128"},
                           {"audio_periods", "3"}, {"stereo", "100"}, {"interp", "4"}, {"rows_per_beat", "4"},
                           {"midi_out", "all"}, {"midi_clock", "1"}, {"midi_notes", "0"}, {"midi_offset_ms", "0"},
-                          {"autoplay", "0"}, {"modules", ""}, {"filter_latency", "0"}, {"filter_send_gain", "0.5"}};
+                          {"autoplay", "0"}, {"modules", ""}, {"filter_latency", "0"}, {"filter_send_gain", "0.5"}, {"main_gain", "0.5"}};
     std::ifstream in(file);
     for (std::string line; std::getline(in, line);)
         if (const auto eq = line.find('='); eq != std::string::npos && trim(line).rfind('#', 0) != 0)
@@ -145,6 +146,8 @@ int run()
     // Before the audio starts (the audio thread reads them from its first period).
     Midi midi(player, settings["midi_out"]);
     player.setMidi(&midi);
+    if (const double g = std::strtod(settings["main_gain"].c_str(), nullptr); g > 0.01) // the hardware's main/PHONES DAC gain
+        player.setOutputGain(static_cast<float>(g));
     if (const double g = std::strtod(settings["filter_send_gain"].c_str(), nullptr); g > 0.01) // the hardware's send gain
         player.setReturnGain(static_cast<float>(1.0 / std::min(g, 1.0)));
     if (const int latency = number(settings, "filter_latency", 0); latency > 0)

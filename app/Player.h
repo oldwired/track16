@@ -74,6 +74,9 @@ public:
     // ---- before the audio starts ----
     void setMidi(MidiScheduler* m) noexcept { midi_.store(m, std::memory_order_release); }
     void setReturnGain(float g) noexcept { returnGain_ = g; } // 1 / filter_send_gain: the return at the send's level
+    // The hardware's fixed gain on the main and PHONES DACs (main_gain, phones: 0.5): the output's full scale is 1 / g
+    // in the engine's units, the soft clip's ceiling.
+    void setOutputGain(float g) noexcept { outputGain_ = std::clamp(g, 0.1f, 1.0f); }
     void setFixedLatency(int frames) noexcept // the filter loop's latency from the settings (no measurement)
     {
         latency_.store(std::clamp(frames, 1, kMaxDelay - 1));
@@ -269,7 +272,8 @@ private:
     int routeHead_ = 0, routeCount_ = 0;
     std::vector<float> delayL_, delayR_, delayWL_, delayWR_;
     static constexpr float kDcPole = 0.999f;          // the return's DC blocker (about 7 Hz)
-    float dcInL_ = 0, dcInR_ = 0, dcOutL_ = 0, dcOutR_ = 0, returnGain_ = 2.0f;
+    float dcInL_ = 0, dcInR_ = 0, dcOutL_ = 0, dcOutR_ = 0, returnGain_ = 2.0f, outputGain_ = 1.0f;
+    bool filterInverse_ = false; // ACTIVE with FILTER pads held: the held channels bypass the filter, the rest go through it
     int delayWrite_ = 0, delayNow_ = 0, delayPrev_ = 0, fadeDelay_ = 0;
     // MIDI clock and notes
     int pulsesLeft_ = 0, pulsesPerRow_ = 6;

@@ -70,10 +70,15 @@ them with the other. HP cutoff is read by the panel and sets the board's high-pa
 The filter board has two ways in, chosen by its select line. **ANALOG FILTER ACTIVE** puts the board in the main
 output's path: the whole mix goes through the filter on its way to MAIN OUT, with no latency (PHONES stays
 unfiltered: it has its own DAC). **FILTER pads** use the send/return loop instead: the held channels go out on the
-filter send and come back on the return, the rest of the mix stays clean. DRIVE is a digital gain (as in the stock
+filter send and come back on the return, the rest of the mix stays clean. **Both together invert it**: with ACTIVE on,
+held (or latched) FILTER pads take their channels *out* of the filter (white pads), and every other channel goes
+round the loop. DRIVE is a digital gain (as in the stock
 firmware) on what goes into the filter, the main mix with ACTIVE or the send with FILTER pads; the saturation is the
-analog board driven hot. OVER lights when that signal peaks above 90 % of its DAC's full scale (with ACTIVE, the main
-DAC has no headroom: at high drive the mix saturates digitally before the board).
+analog board driven hot. OVER lights when that signal peaks above 90 % of its DAC's full scale.
+
+The main DACs run at a fixed −6 dB, as on the stock firmware (`main_gain=0.5`): the engine has 6 dB of headroom above
+a full-scale module before its soft clip, room for DRIVE. MAIN OUT is therefore 6 dB quieter than a 0 dB DAC would
+be; `main_gain=1` brings that level back and gives the headroom up.
 
 Track16 measures the filter loop's latency at start (ANALOG FILTER ACTIVE lights up for a moment; nothing plays until
 it is done) and delays the unfiltered channels by it, so both paths stay aligned. The result is shown and logged
@@ -113,6 +118,7 @@ midi_offset_ms=0
 filter_loop=1        the analog filter loop (0: off)
 filter_latency=0     fixed loop latency in frames (0: measure at start)
 filter_send_gain=0.5 the filter send's level (−6 dB: headroom for the drive); the return is raised by 1/gain
+main_gain=0.5        the main DAC's level (−6 dB as the stock firmware: headroom for DRIVE); 1 = 6 dB louder, no headroom
 stat=10              seconds between STAT lines in bootmenu.log
 ```
 

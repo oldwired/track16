@@ -78,6 +78,9 @@ struct AlsaOutputConfig
     // A fixed gain on the loop's send (imx6: 0.5, the stock firmware's −6 dB on its filter send pair, so the analog
     // drive stage has headroom; setting filter_send_gain).
     float loopGain = 1.0f;
+    // A fixed gain on every port of the main PCM (imx6: 0.5, the stock firmware's −6 dB on its main DAC pairs; setting
+    // main_gain). The app's float full scale is then +6 dBFS: headroom for DRIVE before the soft clip.
+    float mainGain = 1.0f;
 };
 
 class AlsaOutput final : public AudioDevice

@@ -101,6 +101,8 @@ public:
         board_->setEnabled(board);
         if (auto it = settings.find("filter_limit"); it != settings.end()) // 0: leave the limiter line as booted
             board_->setLimit(it->second != "0");
+        if (auto it = settings.find("main_gain"); it != settings.end()) // linear, default 0.5 (−6 dB)
+            mainGain_ = std::clamp(static_cast<float>(std::strtod(it->second.c_str(), nullptr)), 0.1f, 1.0f);
         if (auto it = settings.find("filter_send_gain"); it != settings.end()) // linear, default 0.5 (−6 dB)
             loopGain_ = std::clamp(static_cast<float>(std::strtod(it->second.c_str(), nullptr)), 0.0f, 1.0f);
         map_ = kCodecMap;
@@ -123,7 +125,7 @@ public:
         // Direct ALSA hw device: the codec's 16 channels (MAIN = 12/14, the other output pairs) + PHONES
         devices.push_back(std::make_unique<common::AlsaOutput>(
             common::AlsaOutputConfig {audioDevice_, 16, period_, periods_, map_, phonesDevice_, 2, AudioPort::Phones,
-                                      phonesGain_, phonesS16_, loopDevice_, loopGain_}));
+                                      phonesGain_, phonesS16_, loopDevice_, loopGain_, mainGain_}));
         return devices;
     }
 
@@ -164,6 +166,7 @@ private:
     bool phonesS16_ = false;
     std::string loopDevice_;                        // the analog filter's send/return (opt-in: filter_loop=1)
     float loopGain_ = 0.5f;                         // a fixed −6 dB on the filter send (headroom for the drive)
+    float mainGain_ = 0.5f;                         // a fixed −6 dB on the main DAC pairs (headroom, as the stock firmware)
     std::shared_ptr<panel::AnalogBoard> board_ = std::make_shared<panel::AnalogBoard>();
     common::AlsaPortMap map_ = kCodecMap;
     std::string mapNote_;
