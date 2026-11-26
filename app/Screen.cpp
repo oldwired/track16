@@ -1078,16 +1078,30 @@ bool Screen::handle(const io::ControlEvent& e, double nowMs)
     case C::Bar1:
     case C::Bar2:
     case C::Bar3:
-    {
-        const int q = static_cast<int>(e.control) - static_cast<int>(C::Bar1);
-        player_.quantize = q;
-        static const char* const names[] = {"JUMPS AT PATTERN END", "JUMPS ON THE BEAT", "JUMPS ON THE NEXT ROW"};
-        event(names[q]);
-        break;
-    }
     case C::Bar4:
-        player_.patternLoop = ! player_.patternLoop.load();
-        event(player_.patternLoop.load() ? "PATTERN LOOP ON" : "PATTERN LOOP OFF");
+        if (shift_) // the pads' page: channels / instruments 1–16, 17–32, 33–48, 49–64
+        {
+            const int page = static_cast<int>(e.control) - static_cast<int>(C::Bar1);
+            if (page < pageCount())
+            {
+                player_.page = page;
+                event("PADS PAGE " + juce::String(page + 1) + " (" + juce::String(page * 16 + 1) + "-" + juce::String(page * 16 + 16) + ")");
+            }
+            else
+                event("NO PADS PAGE " + juce::String(page + 1) + ": " + juce::String(pageCount()) + (pageCount() == 1 ? " PAGE" : " PAGES"));
+            break;
+        }
+        if (e.control == C::Bar4)
+        {
+            player_.patternLoop = ! player_.patternLoop.load();
+            event(player_.patternLoop.load() ? "PATTERN LOOP ON" : "PATTERN LOOP OFF");
+            break;
+        }
+        player_.quantize = static_cast<int>(e.control) - static_cast<int>(C::Bar1);
+        {
+            static const char* const names[] = {"JUMPS AT PATTERN END", "JUMPS ON THE BEAT", "JUMPS ON THE NEXT ROW"};
+            event(names[player_.quantize.load()]);
+        }
         break;
     case C::AfsActive:
         if (player_.stems())
@@ -1753,10 +1767,21 @@ void Screen::lamps(io::LampFrame& f, double) const
         f[modes[i]] = i == modeButton ? LampState {mode == PadMode::Kit || mode == PadMode::Outs ? LampMode::BlinkSlow : LampMode::On,
                                                    io::lampcolour::white, 0}
                                       : LampState {};
-    const int q = player_.quantize.load();
-    for (int i = 0; i < 3; ++i)
-        f[static_cast<C>(static_cast<int>(C::Bar1) + i)] = i == q ? LampState {LampMode::On, io::lampcolour::white, 0} : LampState {};
-    f[C::Bar4] = player_.patternLoop.load() ? LampState {LampMode::On, io::lampcolour::white, 0} : LampState {};
+    if (shift_) // SHIFT: the pads' pages; the shown one lit, the others there blinking slowly
+    {
+        const int page = player_.page.load(), pages = pageCount();
+        for (int i = 0; i < 4; ++i)
+            f[static_cast<C>(static_cast<int>(C::Bar1) + i)] = i == page    ? LampState {LampMode::On, io::lampcolour::white, 0}
+                                                               : i < pages ? LampState {LampMode::BlinkSlow, io::lampcolour::white, 0}
+                                                                           : LampState {};
+    }
+    else
+    {
+        const int q = player_.quantize.load();
+        for (int i = 0; i < 3; ++i)
+            f[static_cast<C>(static_cast<int>(C::Bar1) + i)] = i == q ? LampState {LampMode::On, io::lampcolour::white, 0} : LampState {};
+        f[C::Bar4] = player_.patternLoop.load() ? LampState {LampMode::On, io::lampcolour::white, 0} : LampState {};
+    }
     f[C::Scene] = f[C::Pattern] = {};
     // ANALOG FILTER ACTIVE: lit while audio goes through the filter loop (on the unit the lamp also drives the filter
     // board's select line, hw/imx6/AnalogBoard.h) and while the loop's latency is measured.

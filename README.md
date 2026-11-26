@@ -45,6 +45,7 @@ An interactive map of the panel with every control: [oldwired.github.io/track16]
 | STEP 1–16 | Jump to order 1–16 of the current order page; the jump is quantized (BAR keys). SHIFT + STEP n: order page n. In the OUTS pad mode: the outputs (below) |
 | BAR 1 / 2 / 3 | Jumps at the pattern end / on the beat / on the next row |
 | BAR 4 | Pattern loop on/off |
+| SHIFT + BAR 1–4 | The pads' page: channels (or instruments) 1–16, 17–32, 33–48, 49–64. While SHIFT is held the BAR lamps show the pages (lit: shown, blinking: there) |
 | REC | MIDI notes out on/off (module channels 1–16 → MIDI channels 1–16) |
 | ANALOG FILTER ACTIVE | The whole mix through the analog filter (the board in the main output's path) |
 | Knobs 1–6 | TEMPO (SHIFT: 100 %), PITCH (SHIFT: 0), STEREO separation, INTERPolation, GAIN (SHIFT: 0 dB), VIEW (rain density) |
@@ -65,7 +66,8 @@ An interactive map of the panel with every control: [oldwired.github.io/track16]
 | SHIFT + SCALE | **KIT** | Pads 1–16 play instruments 1–16 at their standard pitch | — |
 | SHIFT + TRACK | **OUTS** | Hold (one or more) and press a STEP key: where those channels play (below) | +MAIN on/off |
 
-Pressing the active mode's key again shows the next 16 channels / instruments on the pads.
+Pressing the active mode's key again shows the next 16 channels / instruments on the pads; SHIFT + BAR 1–4 picks a
+page directly. Modules with more than 64 channels play them all, but only 1–64 are on the pads.
 
 ### Single outputs (OUT 3–8)
 

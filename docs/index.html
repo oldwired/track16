@@ -371,7 +371,8 @@ modules/…       your modules, in any folders</pre>
     ['PAT', 'LOOP', 'Pattern loop on/off: the current pattern repeats.'],
   ];
   BARS.forEach(([a, b, act], j) => add({ id: 'bar' + (j + 1), g: 'transport', s: ['r', 1643 + j * 72, 1003, 52, 82, 6], name: 'BAR ' + (j + 1), bar: [a, b], act,
-    lamp: j < 3 ? 'Lit: the selected jump timing.' : 'Lit while the pattern loop is on.' }));
+    sh: `Pads page ${j + 1}: channels (or instruments) ${j * 16 + 1}–${j * 16 + 16}, for modules with more than 16.`,
+    lamp: (j < 3 ? 'Lit: the selected jump timing.' : 'Lit while the pattern loop is on.') + ' While SHIFT is held: the pads\' pages (lit: shown, blinking: there).' }));
 
   // ---------- pad behaviour per mode ----------
   function padInfo(n) {
@@ -644,8 +645,8 @@ modules/…       your modules, in any folders</pre>
     ['unused', ['usbstop']],
   ];
   const MODEKEY_ACT = {
-    ptrack: ['FILTER mode: hold a pad to send that channel through the analog filter. Press again: the next 16 channels.', 'OUTS mode: where each channel plays (MAIN, a single out OUT 3–8, a stereo pair); hold pads and press STEP keys. The screen shows the OUTS page.'],
-    pmute: ['MUTE mode: pads mute channels. Press again: the next 16 channels.', ''],
+    ptrack: ['FILTER mode: hold a pad to send that channel through the analog filter. Press again: the next 16 channels (or SHIFT + BAR 1–4: page 1–4).', 'OUTS mode: where each channel plays (MAIN, a single out OUT 3–8, a stereo pair); hold pads and press STEP keys. The screen shows the OUTS page.'],
+    pmute: ['MUTE mode: pads mute channels. Press again: the next 16 channels (or SHIFT + BAR 1–4: page 1–4).', ''],
     pslice: ['LOOP mode: hold a pad for a stutter loop of 1–64 rows.', ''],
     pscale: ['PLAY mode: the pads play the selected instrument chromatically. Press again: the next 16 instruments.', 'KIT mode: pads 1–16 play instruments 1–16.'],
   };
