@@ -7,7 +7,7 @@ cmake_minimum_required(VERSION 3.25)
 set(APP_NAME "track16")
 set(APP_DISPLAY_NAME "Track16")
 set(APP_ID "io.github.oldwired.track16")
-set(APP_VERSION "0.1.0")
+set(APP_VERSION "0.2.0")
 
 project(${APP_NAME} VERSION ${APP_VERSION} LANGUAGES C CXX ASM)
 set(CMAKE_CXX_STANDARD 20)
