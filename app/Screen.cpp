@@ -119,35 +119,35 @@ struct Screen::StatusRow final : juce::Component
     bool playing = false, litIn = false, litOut = false, filter = false, notes = false;
     double midiInAt = -1e9;
 
-    // Body size (15 lpx, ≈ 9 px on the panel): read from a standing position. Right to left: the play state, the
+    // Title size (17 lpx, ≈ 11 px on the panel): read from a standing position. Right to left: the play state, the
     // NOTES / FILTER / OUT / IN flags, the load; the last event in the room left between.
     void paint(juce::Graphics& g) override
     {
         const float cy = L::statusH / 2;
         const juce::String app = juce::String(identity::displayName).toUpperCase();
-        theme::text(g, 16, cy, Align::Left, Text::BodyStrong, c::text2, app);
-        float x = 16 + theme::textWidth(Text::BodyStrong, app) + 8;
-        theme::text(g, x, cy, Align::Left, Text::BodyStrong, c::text3, kChevron);
-        x += theme::textWidth(Text::BodyStrong, kChevron) + 8;
-        theme::text(g, x, cy, Align::Left, Text::BodyStrong, c::text1, where);
-        x += theme::textWidth(Text::BodyStrong, where) + 32;
+        theme::text(g, 16, cy, Align::Left, Text::Title, c::text2, app);
+        float x = 16 + theme::textWidth(Text::Title, app) + 8;
+        theme::text(g, x, cy, Align::Left, Text::Title, c::text3, kChevron);
+        x += theme::textWidth(Text::Title, kChevron) + 8;
+        theme::text(g, x, cy, Align::Left, Text::Title, c::text1, where);
+        x += theme::textWidth(Text::Title, where) + 32;
         float ix = 1264;
         theme::glyph(g, theme::Glyph::Play, ix - 12, cy - 7, 14, playing ? c::play : c::text3);
         ix -= 32;
         const auto flagText = [&](const char* text, bool lit, juce::Colour ink) {
-            theme::text(g, ix, cy, Align::Right, Text::BodyStrong, lit ? ink : c::text3, text);
-            ix -= theme::textWidth(Text::BodyStrong, text) + 20;
+            theme::text(g, ix, cy, Align::Right, Text::Title, lit ? ink : c::text3, text);
+            ix -= theme::textWidth(Text::Title, text) + 20;
         };
         flagText("NOTES", notes, c::rec);
         flagText("FILTER", filter, c::warn);
         flagText("OUT", litOut, c::accent);
         flagText("IN", litIn, c::accent);
         ix -= 12;
-        theme::text(g, ix, cy, Align::Right, Text::Body, c::text3, diag);
-        ix -= theme::textWidth(Text::Body, diag) + 32;
+        theme::text(g, ix, cy, Align::Right, Text::ValueS, c::text3, diag);
+        ix -= theme::textWidth(Text::ValueS, diag) + 32;
         juce::Graphics::ScopedSaveState s(g);
         g.reduceClipRegion(juce::Rectangle<float>(x, 0, std::max(0.0f, ix - x), L::statusH).toNearestInt());
-        theme::text(g, std::max(x, 300.0f), cy, Align::Left, Text::Body, c::text1, event);
+        theme::text(g, std::max(x, 300.0f), cy, Align::Left, Text::ValueS, c::text1, event);
     }
     void set(juce::String& field, const juce::String& v)
     {
@@ -383,8 +383,8 @@ struct Screen::KnobStrip final : juce::Component
         {
             const auto i = static_cast<std::size_t>(n);
             const float x = L::columnX0 + L::columnW * static_cast<float>(n), cx = x + L::columnW / 2;
-            theme::text(g, cx, L::columnCaptionY, Align::Centre, Text::Title, c::text2, captions[n]);
-            theme::text(g, cx, L::columnValueY, Align::Centre, Text::ValueL, c::text1, text[i]);
+            theme::text(g, cx, L::columnCaptionY, Align::Centre, Text::Label, c::text2, captions[n]);
+            theme::text(g, cx, L::columnValueY, Align::Centre, Text::Value, c::text1, text[i]);
             if (underlined[i])
             {
                 g.setColour(c::accent);
