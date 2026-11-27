@@ -1274,7 +1274,11 @@ bool Screen::handle(const io::ControlEvent& e, double nowMs)
         else
             setView(View::Library);
         break;
-    case C::Play: player_.togglePlay(); break;
+    case C::Play:
+        if (song_)
+            event(player_.playing() ? juce::String("PAUSED") : "PLAYING " + juce::String::fromUTF8(song_->title.c_str()));
+        player_.togglePlay();
+        break;
     case C::Stop:
         player_.stop();
         if (shift_) // everything back: mutes, solos

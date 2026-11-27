@@ -132,6 +132,11 @@ a { color: var(--accent); }
 footer { color: var(--fg-2); font-size: .88rem; border-top: 1px solid var(--line); padding-top: 14px; }
 footer p { margin: 0 0 6px; max-width: 90ch; }
   .app-icon { width: 1em; height: 1em; vertical-align: -0.12em; margin-right: 0.3em; border-radius: 22%; }
+  .shots { display: grid; grid-template-columns: 3fr 2fr; gap: 16px; align-items: start; margin-top: 8px; }
+  .shots figure { margin: 0; }
+  .shots img { display: block; width: 100%; height: auto; border-radius: 10px; border: 1px solid var(--line); background: #0b0d10; }
+  .shots figcaption { color: var(--fg-2); font-size: .9rem; margin-top: 6px; }
+  @media (max-width: 720px) { .shots { grid-template-columns: 1fr; } }
 </style>
 </head>
 <body>
@@ -153,6 +158,13 @@ footer p { margin: 0 0 6px; max-width: 90ch; }
       </div>
     </div>
 
+    <div class="shots">
+      <figure class="wide"><img src="screens/player.png" width="800" height="480" alt="The PLAYER screen: eight channels of pattern data falling onto a highlighted playhead row, notes in white, instruments in colour, effects in amber, with order, row, speed and BPM above and the six knob values below.">
+        <figcaption>The PLAYER: the pattern falls onto the playhead row; notes, instruments and effects in tracker colours.</figcaption></figure>
+      <figure><img src="screens/library.png" width="800" height="480" alt="The LIBRARY screen: a list of module files with their titles, formats, channel counts, lengths and sizes.">
+        <figcaption>The LIBRARY: every module on the stick, with format, channels and length.</figcaption></figure>
+    </div>
+
     <div class="features">
       <article style="--c: var(--g-transport)"><h3>Modules</h3><p>Every module on the stick in a browser, any
         folders. Playback by libopenmpt with adjustable tempo, pitch, stereo separation and interpolation.</p></article>
@@ -169,7 +181,8 @@ footer p { margin: 0 0 6px; max-width: 90ch; }
         notes on 16 channels. Follows a master's clock, rows locked to its pulses; MIDI channel n plays module channel
         n's voice, with bend and vibrato; a control channel works as remote pads and knobs.</p></article>
       <article style="--c: var(--g-nav)"><h3>Display</h3><p>The pattern data falls as &ldquo;digital rain&rdquo; onto a
-        playhead, each note flaring in its instrument's colour, with a level per channel in the headers.</p></article>
+        playhead in tracker colours, each note flaring in its instrument's colour, with row numbers, beat lines and
+        each channel's name and level. SHIFT + HOME saves a screenshot to the stick.</p></article>
     </div>
 
     <h2 class="chapter">Getting started</h2>
