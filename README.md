@@ -6,7 +6,7 @@ with: pad modes for muting, looping, playing the module's instruments and sendin
 analog filter, channels on the single outputs OUT 3–8, MIDI clock and notes on the MIDI outs, and the pattern data as
 "digital rain" on the display.
 
-Status: 0.2.0, in testing on the unit. The engine is tested on a build machine (`tests/`); playback, the pad modes,
+Status: 0.3.0, in testing on the unit. The engine is tested on a build machine (`tests/`); playback, the pad modes,
 the analog filter routes, MIDI out, following a MIDI clock and the output test tones have been checked on a unit. The app is started from the community [boot menu](https://github.com/freesp16/bootmenu);
 nothing is installed on the unit and nothing is written to its internal memory.
 
