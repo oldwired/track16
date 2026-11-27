@@ -58,15 +58,16 @@ inline constexpr float radiusXs = 4, radiusS = 6, radiusM = 8, radiusL = 12;
 inline constexpr float pad = 16, gap = 8;
 namespace layout
 {
-inline constexpr float statusH = 40, contextY = 40, contextH = 96, stripH = 144, stripY = kCanvasH - stripH;
-inline constexpr float bodyY = contextY + contextH, contentTop = bodyY + pad, contentBottom = stripY - pad; // 152–608
+inline constexpr float statusH = 40, contextY = 40, contextH = 96, stripH = 120, stripY = kCanvasH - stripH;
+inline constexpr float bodyY = contextY + contextH, contentTop = bodyY + pad, contentBottom = stripY - pad; // 152–632
 inline constexpr float ctlY = contextY + 12, ctlH = 72, captionY = 72, valueY = 104;
 inline const juce::Rectangle<float> slotA {16, ctlY, 96, ctlH}, slotB {120, ctlY, 256, ctlH}, slotC {384, ctlY, 256, ctlH},
     slotD {648, ctlY, 160, ctlH}, slotE {824, ctlY, 440, ctlH};
 inline constexpr float readoutX = 664, menuButtonW = 104;
 inline juce::Rectangle<float> menuButton(int i) { return {slotE.getX() + (menuButtonW + gap) * static_cast<float>(i), ctlY, menuButtonW, ctlH}; }
-inline constexpr float tabW = 248, tabTopW = 224, tabH = 24, columnX0 = 16, columnW = 208;
-inline constexpr float columnCaptionY = 654, columnValueY = 694, columnTrackY = 738, columnUnderlineY = 720; // large type
+inline constexpr float columnX0 = 16, columnW = 208;
+inline constexpr float columnCaptionY = stripY + 27, columnValueY = stripY + 63, columnUnderlineY = stripY + 87,
+                       columnTrackY = stripY + 101; // large type
 inline constexpr float meterColumnX = 1176;
 } // namespace layout
 

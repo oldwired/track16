@@ -193,6 +193,8 @@ private:
     double beatsSaveMs_ = 0;
     double layoutSaveMs_ = 0, outsMeterMs_ = 0;
     double lastFrameMs_ = 0, backDownMs_ = -1;
+    static constexpr double kEventMs = 4000; // how long a message stays in the status row
+    double eventUntilMs_ = 0;
     juce::String statusBase_;
     std::array<double, 16> padHitMs_ {};
     std::array<float, kMaxChannels> peakHold_ {}; // the rain's level peaks, and when each was reached

@@ -32,7 +32,8 @@ const juce::String kDot = juce::String(juce::CharPointer_UTF8("\xC2\xB7"));     
 
 // The body (canvas lpx) and the rain area (LCD px).
 const juce::Rectangle<float> kBody {0, L::bodyY + 1, theme::kCanvasW, L::stripY - L::bodyY - 1};
-constexpr float kRainX = 8, kRainY = 96, kRainW = 784, kRainH = 284; // inside the body: 152…606 lpx
+constexpr float kRainX = 8, kRainY = 96, kRainW = 784; // inside the body (LCD px = lpx × 0.625)
+constexpr float kRainH = L::contentBottom * Screen::kWidth / theme::kCanvasW - kRainY; // to the body's bottom margin
 
 std::uint64_t nowNs() noexcept
 {
@@ -352,11 +353,10 @@ struct Screen::KnobStrip final : juce::Component
     std::array<juce::String, 6> text {};
     std::array<double, 6> touchedAt {-1e9, -1e9, -1e9, -1e9, -1e9, -1e9};
     std::array<bool, 6> underlined {};
-    juce::String tab = "PLAYER";
 
     juce::Rectangle<int> column(int n) const
     {
-        return juce::Rectangle<float>(L::columnX0 + L::columnW * static_cast<float>(n), L::tabH, L::columnW, L::stripH - L::tabH).toNearestInt();
+        return juce::Rectangle<float>(L::columnX0 + L::columnW * static_cast<float>(n), 0, L::columnW, L::stripH).toNearestInt();
     }
     void set(int n, float v, const juce::String& t)
     {
@@ -379,11 +379,6 @@ struct Screen::KnobStrip final : juce::Component
         g.setColour(c::surface1);
         g.fillRect(0.0f, L::stripY, theme::kCanvasW, L::stripH);
         theme::hline(g, 0, theme::kCanvasW, L::stripY, c::border);
-        juce::Path tabPath;
-        tabPath.addQuadrilateral(0, L::stripY, L::tabTopW, L::stripY, L::tabW, L::stripY + L::tabH, 0, L::stripY + L::tabH);
-        g.setColour(c::surface2);
-        g.fillPath(tabPath);
-        theme::text(g, 16, L::stripY + 13, Align::Left, Text::Label, c::text2, tab);
         for (int n = 0; n < 6; ++n)
         {
             const auto i = static_cast<std::size_t>(n);
@@ -608,7 +603,12 @@ void Screen::setStatus(const Status& s)
     status_->set(status_->diag, statusBase_);
 }
 
-void Screen::event(const juce::String& text) { status_->set(status_->event, text.toUpperCase()); }
+// A message in the status row for kEventMs; then the lasting state comes back (frame(): PLAYING: <title>, …).
+void Screen::event(const juce::String& text)
+{
+    status_->set(status_->event, text.toUpperCase());
+    eventUntilMs_ = lastFrameMs_ + kEventMs;
+}
 
 void Screen::start()
 {
@@ -1274,11 +1274,7 @@ bool Screen::handle(const io::ControlEvent& e, double nowMs)
         else
             setView(View::Library);
         break;
-    case C::Play:
-        if (song_)
-            event(player_.playing() ? juce::String("PAUSED") : "PLAYING " + juce::String::fromUTF8(song_->title.c_str()));
-        player_.togglePlay();
-        break;
+    case C::Play: player_.togglePlay(); break;
     case C::Stop:
         player_.stop();
         if (shift_) // everything back: mutes, solos
@@ -1476,6 +1472,21 @@ void Screen::frame(double nowMs, float fps)
     player_.collect();
     takeLoaded();
     takeProbed();
+    // The status row's lasting state, once a message has had its time: PLAYING: / PAUSED: / READY: <title>.
+    if (nowMs >= eventUntilMs_)
+    {
+        juce::String state = "NO MODULE " + kDot + " PUSH SELECT IN THE LIBRARY";
+        if (song_)
+        {
+            const auto pos = player_.position();
+            const char* what = player_.syncState() == Player::SyncWaiting ? "WAITING FOR THE CLOCK: "
+                             : player_.playing()                          ? "PLAYING: "
+                             : pos.order == 0 && pos.row == 0             ? "READY: "
+                                                                          : "PAUSED: ";
+            state = what + juce::String::fromUTF8(song_->title.c_str());
+        }
+        status_->set(status_->event, state.toUpperCase());
+    }
     if (const int m = player_.measurements(); m != lastMeasurements_)
     {
         lastMeasurements_ = m;
