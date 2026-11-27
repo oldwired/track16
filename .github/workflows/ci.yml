@@ -1,7 +1,9 @@
 name: CI
 
 # Manual runs (Actions tab or `gh workflow run CI`) and release tags only: a unit build takes a while, and
-# day-to-day builds run locally (scripts/build-unit.sh).
+# day-to-day builds run locally (scripts/build-unit.sh). A pushed tag v<version> also makes a draft release with the
+# binary and the boilerplate notes (install, source, checksum, the commits since the last tag); write the highlights
+# and publish it on GitHub.
 on:
   push:
     tags: ['v*']
@@ -33,3 +35,63 @@ jobs:
           name: track16
           path: out/track16
           retention-days: 7
+
+  release:
+    name: Draft the release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: unit
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # the tags, for the commits since the last one
+      - uses: actions/download-artifact@v4
+        with:
+          name: track16
+          path: out
+      - name: Create the draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -eu
+          version=$(sed -n 's/^set(APP_VERSION "\(.*\)")$/\1/p' CMakeLists.txt)
+          if [ "$TAG" != "v$version" ]; then
+            echo "tag $TAG does not match APP_VERSION $version in CMakeLists.txt" >&2
+            exit 1
+          fi
+          chmod +x out/track16
+          sha=$(sha256sum out/track16 | cut -d' ' -f1)
+          juce=$(git ls-tree HEAD third_party/JUCE | awk '{print $3}')
+          previous=$(git describe --tags --abbrev=0 "$TAG^" 2>/dev/null || true)
+          {
+            echo "_Highlights: write them here, then publish._"
+            echo
+            echo "**Controls and documentation:** https://oldwired.github.io/track16 (interactive panel map) and the [README](https://github.com/${GITHUB_REPOSITORY}#readme)."
+            echo
+            echo "### Changes"
+            if [ -n "$previous" ]; then
+              git log --no-merges --format='- %s' "$previous..$TAG"
+              echo
+              echo "Full list: https://github.com/${GITHUB_REPOSITORY}/compare/$previous...$TAG"
+            else
+              echo "- First release"
+            fi
+            echo
+            echo "### Install"
+            echo "1. Put the [freesp16 boot menu](https://github.com/freesp16/bootmenu) (\`autoexec.bin\`) on a USB stick."
+            echo "2. Copy \`track16\` from this release and your modules (any folders) onto the stick."
+            echo "3. Plug the stick into the running SP-16 and choose **Track16** in the boot menu. **SHIFT + BACK** quits."
+            echo
+            echo "Nothing is installed on the unit and nothing is written to its internal memory."
+            echo
+            echo "### Source"
+            echo "GPL-3.0. Built by CI from tag \`$TAG\`; the complete source is this tag plus the JUCE submodule (commit \`${juce:0:8}\`, AGPLv3): \`git clone --recursive --branch $TAG https://github.com/${GITHUB_REPOSITORY}\`."
+            echo
+            echo "\`track16\` SHA-256: \`$sha\`"
+            echo
+            echo "An independent community project, not affiliated with or endorsed by Pioneer DJ or AlphaTheta. Running unofficial software on your unit is at your own risk."
+          } > notes.md
+          gh release create "$TAG" out/track16 --draft --title "Track16 $version" --notes-file notes.md --verify-tag

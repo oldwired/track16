@@ -232,6 +232,10 @@ scripts/test-host.sh ../modules         # engine tests with a folder of modules
 
 `scripts/build-unit.sh` needs Docker (Colima works); the first run builds the cross toolchain (about 30 minutes).
 
+**Releases**: set `APP_VERSION` in CMakeLists.txt, then tag and push (`git tag v0.2.0 && git push origin v0.2.0`).
+CI builds the binary and creates a draft release with it, the checksum and the commits since the last tag; add the
+highlights and publish it on GitHub.
+
 ## Code
 
 | Path | What it is |
