@@ -118,27 +118,35 @@ struct Screen::StatusRow final : juce::Component
     bool playing = false, litIn = false, litOut = false, filter = false, notes = false;
     double midiInAt = -1e9;
 
+    // Body size (15 lpx, ≈ 9 px on the panel): read from a standing position. Right to left: the play state, the
+    // NOTES / FILTER / OUT / IN flags, the load; the last event in the room left between.
     void paint(juce::Graphics& g) override
     {
         const float cy = L::statusH / 2;
         const juce::String app = juce::String(identity::displayName).toUpperCase();
-        theme::text(g, 16, cy, Align::Left, Text::Label, c::text2, app);
-        float x = 16 + theme::textWidth(Text::Label, app) + 8;
-        theme::text(g, x, cy, Align::Left, Text::Label, c::text3, kChevron);
-        x += theme::textWidth(Text::Label, kChevron) + 8;
-        theme::text(g, x, cy, Align::Left, Text::Label, c::text1, where);
-        theme::text(g, 300, cy, Align::Left, Text::Caption, c::text2, event);
+        theme::text(g, 16, cy, Align::Left, Text::BodyStrong, c::text2, app);
+        float x = 16 + theme::textWidth(Text::BodyStrong, app) + 8;
+        theme::text(g, x, cy, Align::Left, Text::BodyStrong, c::text3, kChevron);
+        x += theme::textWidth(Text::BodyStrong, kChevron) + 8;
+        theme::text(g, x, cy, Align::Left, Text::BodyStrong, c::text1, where);
+        x += theme::textWidth(Text::BodyStrong, where) + 32;
         float ix = 1264;
-        theme::glyph(g, theme::Glyph::Play, ix - 9, cy - 5, 10, playing ? c::play : c::text3);
-        ix -= 44;
-        theme::text(g, ix, cy, Align::Right, Text::Caption, notes ? c::rec : c::text3, "NOTES");
-        ix -= 64;
-        theme::text(g, ix, cy, Align::Right, Text::Caption, filter ? c::warn : c::text3, "FILTER");
-        ix -= 72;
-        theme::text(g, ix, cy, Align::Right, Text::Caption, litOut ? c::accent : c::text3, "OUT");
-        ix -= 40;
-        theme::text(g, ix, cy, Align::Right, Text::Caption, litIn ? c::accent : c::text3, "IN");
-        theme::text(g, ix - 48, cy, Align::Right, Text::Caption, c::text3, diag);
+        theme::glyph(g, theme::Glyph::Play, ix - 12, cy - 7, 14, playing ? c::play : c::text3);
+        ix -= 32;
+        const auto flagText = [&](const char* text, bool lit, juce::Colour ink) {
+            theme::text(g, ix, cy, Align::Right, Text::BodyStrong, lit ? ink : c::text3, text);
+            ix -= theme::textWidth(Text::BodyStrong, text) + 20;
+        };
+        flagText("NOTES", notes, c::rec);
+        flagText("FILTER", filter, c::warn);
+        flagText("OUT", litOut, c::accent);
+        flagText("IN", litIn, c::accent);
+        ix -= 12;
+        theme::text(g, ix, cy, Align::Right, Text::Body, c::text3, diag);
+        ix -= theme::textWidth(Text::Body, diag) + 32;
+        juce::Graphics::ScopedSaveState s(g);
+        g.reduceClipRegion(juce::Rectangle<float>(x, 0, std::max(0.0f, ix - x), L::statusH).toNearestInt());
+        theme::text(g, std::max(x, 300.0f), cy, Align::Left, Text::Body, c::text1, event);
     }
     void set(juce::String& field, const juce::String& v)
     {
@@ -149,7 +157,7 @@ struct Screen::StatusRow final : juce::Component
     void flag(T& field, const T& v)
     {
         if (assign(field, v))
-            repaint(900, 0, 380, static_cast<int>(L::statusH));
+            repaint();
     }
 };
 
@@ -1548,8 +1556,8 @@ void Screen::frame(double nowMs, float fps)
     if (halfSecond)
     {
         char tail[96];
-        std::snprintf(tail, sizeof tail, " · %.0f FPS · DSP %.1f%%", static_cast<double>(fps), static_cast<double>(player_.loadAverage() * 100.0f));
-        status_->set(status_->diag, statusBase_ + juce::String::fromUTF8(tail));
+        std::snprintf(tail, sizeof tail, "%.0f FPS · DSP %.0f%%", static_cast<double>(fps), static_cast<double>(player_.loadAverage() * 100.0f));
+        status_->set(status_->diag, juce::String::fromUTF8(tail)); // the platform and renderer are in the log
     }
 
     // Context bar.
