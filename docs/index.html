@@ -334,7 +334,7 @@ modules/…       your modules, in any folders</pre>
     ['STEREO', 'Stereo separation 0…200 % (100 % = as the module).', '', ''],
     ['INTERP', 'Interpolation: none, linear, cubic, 8-tap sinc.', '', ''],
     ['GAIN', 'Gain −24…+12 dB in 0.5 dB steps.', 'GAIN 0 dB', 'Back to 0 dB.'],
-    ['VIEW', 'Density of the pattern rain on the PLAYER screen.', '', ''],
+    ['VIEW', 'How much of each cell the pattern rain shows: AUTO (the most that fits), FULL (note, instrument, volume, effect), WIDE (note, instrument, effect), MEDIUM (note, instrument), COMPACT (note), RAIN (one character).', '', ''],
   ];
   ENC.forEach(([tag, act, shTag, sh], i) => add({ id: 'enc' + (i + 1), g: i === 5 ? 'nav' : 'sound', s: ['c', 1083 + i * 121.5, 758, 44],
     name: 'ENCODER ' + (i + 1), tag, shTag: shTag || tag, act, sh: sh || '', enc: true }));
@@ -343,7 +343,7 @@ modules/…       your modules, in any folders</pre>
     act: 'Not used. Quit with SHIFT + BACK before you pull the stick: Track16 and the boot menu write their logs to it.' });
   add({ id: 'back', g: 'nav', s: ['r', 1800, 298, 58, 30, 14], name: 'BACK', tag: 'SWITCH VIEW', shTag: 'QUIT',
     act: 'Switch between LIBRARY and PLAYER.', sh: 'Quit Track16 back to the boot menu.' });
-  add({ id: 'home', g: 'nav', s: ['c', 1914, 313, 16], name: 'HOME', tag: 'LIBRARY', act: 'Go to the LIBRARY.' });
+  add({ id: 'home', g: 'nav', s: ['c', 1914, 313, 16], name: 'HOME', tag: 'LIBRARY', act: 'Go to the LIBRARY.', sh: 'Screenshot: the screen as it is, to track16-data/track16/screenshots/ on the stick.' });
   add({ id: 'sel', g: 'nav', s: ['c', 1862, 470, 72], name: 'SELECT (turn / push)', tag: 'CHOOSE · PUSH: LOAD', shTag: 'CHOOSE ×10',
     act: 'LIBRARY: turn to choose a module, push to load it (PLAY starts it). PLAYER: turn to choose the instrument for the PLAY pads, push to go back to the LIBRARY.',
     sh: 'LIBRARY: moves 10 modules per step.' });

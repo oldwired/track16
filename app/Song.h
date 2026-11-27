@@ -125,6 +125,16 @@ struct Song
 std::unique_ptr<Song> loadSong(const std::string& path, bool stems, int outStems, int sampleRate, int stereoSeparation, int interpolation,
                                std::string& error);
 
+// What the library shows of a module it has not loaded: the format, title, channels and length. A quick parse
+// without samples (load.skip_samples); any thread but the audio thread. False when libopenmpt cannot read it.
+struct ModuleInfo
+{
+    std::string type, title;
+    int channels = 0;
+    double seconds = 0;
+};
+bool probeModule(const std::string& path, ModuleInfo& info);
+
 // True for file names libopenmpt is likely to play (by extension; the loader decides).
 bool looksLikeModule(const std::string& fileName);
 } // namespace app

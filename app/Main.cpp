@@ -234,6 +234,7 @@ int run()
         return 2;
     }
     logLine("DISPLAY %s", gl.describe().c_str());
+    screen.onScreenshot = [&gl](const std::string& path) { gl.capture(path); };
     screen.setStatus({std::string(machine->id()), std::string("gl-") + flavour,
                       audio != nullptr ? std::string(audio->id()) : std::string("no audio")});
     screen.start();

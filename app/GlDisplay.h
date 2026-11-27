@@ -32,6 +32,7 @@ public:
     bool open(const platform::RendererEnv&, std::string_view flavour, juce::Component& ui, std::string& error);
     // Draws and presents one frame. False when the surface is lost.
     bool draw(const SceneInput&);
+    void capture(const std::string& pngPath); // the next frame, as shown, to a PNG file
     std::string describe() const;
 
 private:

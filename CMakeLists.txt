@@ -69,7 +69,8 @@ target_compile_options(juce PRIVATE $<$<CONFIG:Release>:-O3>)
 
 # The embedded fonts (the unit has no font files).
 juce_add_binary_data(app_fonts HEADER_NAME AppFonts.h NAMESPACE AppFonts SOURCES
-    resources/fonts/Inter-Regular.subset.ttf resources/fonts/Inter-Medium.subset.ttf resources/fonts/Inter-SemiBold.subset.ttf)
+    resources/fonts/Inter-Regular.subset.ttf resources/fonts/Inter-Medium.subset.ttf resources/fonts/Inter-SemiBold.subset.ttf
+    resources/fonts/JetBrainsMonoNL-Medium.subset.ttf resources/fonts/JetBrainsMonoNL-Bold.subset.ttf)
 
 # ---- libopenmpt (third_party/libopenmpt): module playback -----------------------------------------------------------
 include(cmake/libopenmpt.cmake)
@@ -90,6 +91,13 @@ set_source_files_properties(app/Synth.cpp PROPERTIES COMPILE_OPTIONS
 if(CMAKE_CROSSCOMPILING)
     target_compile_options(code PRIVATE -ffunction-sections -fdata-sections)
     add_link_options(-Wl,--gc-sections)
+endif()
+
+# A build-machine tool that renders the screen to PNG files (tools/preview.cpp, scripts/preview.sh); not for the unit.
+option(TRACK16_PREVIEW "build track16_preview" OFF)
+if(TRACK16_PREVIEW)
+    add_executable(track16_preview tools/preview.cpp)
+    target_link_libraries(track16_preview PRIVATE code)
 endif()
 
 add_executable(${APP_NAME} app/Main.cpp hw/common/GlDispatch.cpp)

@@ -6,8 +6,11 @@
 #include "ProjectIdentity.h"
 #include "controls/ControlNames.h"
 
+#include <sys/resource.h>
 #include <sys/stat.h>
+#include <sys/syscall.h>
 #include <time.h>
+#include <unistd.h>
 
 #include <algorithm>
 #include <cmath>
@@ -65,7 +68,11 @@ inline std::uint32_t mix(std::uint32_t a, std::uint32_t b, float t) noexcept // 
     return ch(16) | ch(8) | ch(0);
 }
 
-constexpr std::uint32_t kRain = 0x3CDC78, kRainDim = 0x1E6E3C, kMuted = 0x5A5F66, kFiltered = 0xFF7A3C, kWhite = 0xFFFFFF;
+constexpr std::uint32_t kRain = 0x3CDC78, kMuted = 0x5A5F66, kFiltered = 0xFF7A3C, kWhite = 0xFFFFFF;
+// The rain's fields (tracker style): note, note off, volume, effect, empty dots; the gutter's row numbers; separators
+// and the playhead band (opaque: the background is #0B0D10).
+constexpr std::uint32_t kNote = 0xE4FFEC, kNoteOff = 0x8A9A90, kVol = 0x5FD08C, kFx = 0xFFB65C, kEmpty = 0x34463C;
+constexpr std::uint32_t kGutter = 0x56645C, kGutterBeat = 0x8FA898, kSeparator = 0x1A231E, kBand = 0x15291D;
 
 std::uint32_t instrumentColour(int instrument1) // 1-based
 {
@@ -215,6 +222,7 @@ struct Screen::Browser final : juce::Component
 {
     const Library* library = nullptr;
     int selected = 0, top = 0, playing = -1;
+    std::vector<ModuleInfo> info; // per entry, as the prober finds it (channels 0: not yet)
     static constexpr float kRowH = 60, kHeadH = 52; // large: read on a 7" screen from a standing position
     juce::String root;
 
@@ -285,9 +293,35 @@ struct Screen::Browser final : juce::Component
                 theme::text(g, x, r.getCentreY(), Align::Left, Text::ValueS, c::text3, folder);
                 x += theme::textWidth(Text::ValueS, folder) + 12;
             }
-            theme::text(g, x, r.getCentreY(), Align::Left, Text::Value, i == selected ? c::text1 : c::text2,
-                        juce::String::fromUTF8(e.name.c_str()));
-            theme::text(g, r.getRight() - 16, r.getCentreY(), Align::Right, Text::Body, c::text3, sizeText(e.size));
+            const juce::String name = juce::String::fromUTF8(e.name.c_str());
+            theme::text(g, x, r.getCentreY(), Align::Left, Text::Value, i == selected ? c::text1 : c::text2, name);
+            x += theme::textWidth(Text::Value, name) + 16;
+            // Right: format, channels, length (once probed), size; the title between, where it fits.
+            float right = r.getRight() - 16;
+            theme::text(g, right, r.getCentreY(), Align::Right, Text::Body, c::text3, sizeText(e.size));
+            right -= theme::textWidth(Text::Body, sizeText(e.size)) + 24;
+            const ModuleInfo* m = static_cast<std::size_t>(i) < info.size() && info[static_cast<std::size_t>(i)].channels > 0
+                                      ? &info[static_cast<std::size_t>(i)] : nullptr;
+            if (m != nullptr)
+            {
+                const int secs = static_cast<int>(m->seconds + 0.5);
+                char facts[64];
+                std::snprintf(facts, sizeof facts, "%s  %s  %d CH  %s  %d:%02d", juce::String(m->type).toUpperCase().toRawUTF8(),
+                              kDot.toRawUTF8(), m->channels, kDot.toRawUTF8(), secs / 60, secs % 60);
+                const juce::String f = juce::String::fromUTF8(facts);
+                theme::text(g, right, r.getCentreY(), Align::Right, Text::BodyStrong, i == selected ? c::text1 : c::text2, f);
+                right -= theme::textWidth(Text::BodyStrong, f) + 24;
+                juce::String title = juce::String::fromUTF8(m->title.c_str()).trim();
+                if (title.isNotEmpty() && ! title.equalsIgnoreCase(name) && ! title.equalsIgnoreCase(name.upToLastOccurrenceOf(".", false, false)))
+                {
+                    const juce::String ellipsis = juce::String(juce::CharPointer_UTF8("\xE2\x80\xA6"));
+                    juce::String shown = title;
+                    while (shown.length() > 3 && x + theme::textWidth(Text::Body, shown == title ? shown : shown + ellipsis) > right)
+                        shown = shown.dropLastCharacters(1).trimEnd();
+                    if (x + theme::textWidth(Text::Body, shown == title ? shown : shown + ellipsis) <= right)
+                        theme::text(g, x, r.getCentreY(), Align::Left, Text::Body, c::text3, shown == title ? shown : shown + ellipsis);
+                }
+            }
         }
         // The scroll position.
         if (static_cast<int>(list.size()) > rows)
@@ -549,6 +583,9 @@ Screen::~Screen()
     loadWake_.notify_all();
     if (loader_.joinable())
         loader_.join();
+    probeQuit_ = true;
+    if (prober_.joinable())
+        prober_.join();
     if (layoutDirty_)
         saveLayout();
     if (beatsDirty_)
@@ -569,6 +606,13 @@ void Screen::start()
 {
     loadBeats();
     library_.scan(config_.roots);
+    browser_->info.assign(library_.entries().size(), {});
+    {
+        std::vector<std::string> paths;
+        for (const auto& e : library_.entries())
+            paths.push_back(e.path);
+        prober_ = std::thread([this, paths = std::move(paths)]() mutable { proberThread(std::move(paths)); });
+    }
     browser_->root = juce::String::fromUTF8(library_.root().c_str());
     browser_->select(0);
     logLine("LIBRARY %d modules in %s", static_cast<int>(library_.entries().size()), library_.root().c_str());
@@ -647,6 +691,8 @@ void Screen::takeLoaded()
     pending_ = std::move(r->song); // replaces one the player has not taken yet
     playingIndex_ = r->job.index;
     browser_->playing = r->job.index;
+    if (r->job.index >= 0 && static_cast<std::size_t>(r->job.index) < browser_->info.size())
+        browser_->info[static_cast<std::size_t>(r->job.index)] = {d.type, d.title, d.channels, d.durationSeconds};
     mutes_ = solos_ = 0;
     player_.muteMask = 0;
     player_.soloMask = 0;
@@ -854,6 +900,61 @@ void Screen::saveBeats()
         out << rpb << ' ' << name << '\n';
     if (! out)
         logLine("BEAT cannot write %s", file.c_str());
+}
+
+// The library's facts (format, channels, length, title) for every entry, one by one at the lowest priority, so the
+// list fills in while it is shown; the screen takes them each frame (takeProbed).
+void Screen::proberThread(std::vector<std::string> paths)
+{
+    ::setpriority(PRIO_PROCESS, static_cast<id_t>(::syscall(SYS_gettid)), 19);
+    for (std::size_t i = 0; i < paths.size() && ! probeQuit_.load(); ++i)
+    {
+        ModuleInfo info;
+        if (! probeModule(paths[i], info) || info.channels <= 0)
+            continue;
+        std::lock_guard<std::mutex> lock(probeMutex_);
+        probed_.emplace_back(static_cast<int>(i), std::move(info));
+    }
+}
+
+void Screen::takeProbed()
+{
+    std::vector<std::pair<int, ModuleInfo>> done;
+    {
+        std::lock_guard<std::mutex> lock(probeMutex_);
+        done.swap(probed_);
+    }
+    for (auto& [i, info] : done)
+        if (static_cast<std::size_t>(i) < browser_->info.size() && browser_->info[static_cast<std::size_t>(i)].channels == 0)
+            browser_->info[static_cast<std::size_t>(i)] = std::move(info);
+    if (! done.empty() && view_ == View::Library)
+        browser_->repaint();
+}
+
+// SHIFT + HOME: the next frame, as the panel shows it, to the first free <dataDir>/screenshots/track16-NNN.png (on
+// the stick: track16-data/track16/screenshots/).
+void Screen::screenshot()
+{
+    if (! onScreenshot || config_.dataDir.empty())
+    {
+        event("NO SCREENSHOTS HERE");
+        return;
+    }
+    const std::string dir = config_.dataDir + "/screenshots";
+    ::mkdir(config_.dataDir.c_str(), 0755);
+    ::mkdir(dir.c_str(), 0755);
+    for (int n = 1; n < 1000; ++n)
+    {
+        char name[32];
+        std::snprintf(name, sizeof name, "track16-%03d.png", n);
+        struct stat st {};
+        if (::stat((dir + "/" + name).c_str(), &st) == 0)
+            continue;
+        onScreenshot(dir + "/" + name);
+        event("SCREENSHOT " + juce::String(name));
+        return;
+    }
+    event("SCREENSHOTS FULL (999)");
 }
 
 // The module's own layout (<dataDir>/outs/<file name>.txt), or the default one.
@@ -1093,7 +1194,7 @@ bool Screen::handle(const io::ControlEvent& e, double nowMs)
             break;
         }
         case 5: player_.gainDb = shift_ ? 0.0f : std::clamp(player_.gainDb.load() + 0.5f * static_cast<float>(d), -24.0f, 12.0f); break;
-        case 6: density_ = static_cast<Density>(std::clamp(static_cast<int>(density_) + (d > 0 ? 1 : -1), 0, 4)); break;
+        case 6: density_ = static_cast<Density>(std::clamp(static_cast<int>(density_) + (d > 0 ? 1 : -1), 0, 5)); break;
         default: break;
         }
         return true;
@@ -1137,7 +1238,12 @@ bool Screen::handle(const io::ControlEvent& e, double nowMs)
         else
             setView(view_ == View::Player ? View::Library : View::Player);
         break;
-    case C::Home: setView(View::Library); break;
+    case C::Home:
+        if (shift_)
+            screenshot();
+        else
+            setView(View::Library);
+        break;
     case C::StripMode:
     {
         const int m = stripMode_ = (stripMode_ + 1) % Player::StripModes;
@@ -1327,7 +1433,7 @@ void Screen::midiControl(int cc, int v, double nowMs)
         break;
     }
     case 74: player_.gainDb = v < 64 ? -24.0f + 24.0f * static_cast<float>(v) / 64.0f : 12.0f * static_cast<float>(v - 64) / 63.0f; knob(4); break;
-    case 75: density_ = static_cast<Density>(std::clamp(v * 5 / 128, 0, 4)); knob(5); break;
+    case 75: density_ = static_cast<Density>(std::clamp(v * 6 / 128, 0, 5)); knob(5); break;
     case 76: player_.drive = v * 1023 / 127; break;
     case 80:
         if (player_.stems() && player_.masterFilter.load() != (v >= 64))
@@ -1357,6 +1463,7 @@ void Screen::frame(double nowMs, float fps)
     lastFrameMs_ = nowMs;
     player_.collect();
     takeLoaded();
+    takeProbed();
     if (const int m = player_.measurements(); m != lastMeasurements_)
     {
         lastMeasurements_ = m;
@@ -1382,9 +1489,9 @@ void Screen::frame(double nowMs, float fps)
             loadLayout();
             context_->set(context_->title, juce::String::fromUTF8(song_->title.c_str()));
             char info[160];
-            std::snprintf(info, sizeof info, "%s · %d CH · %d ORD · %d:%02d", juce::String(song_->type).toUpperCase().toRawUTF8(),
-                          song_->channels, song_->numOrders, static_cast<int>(song_->durationSeconds) / 60,
-                          static_cast<int>(song_->durationSeconds) % 60);
+            std::snprintf(info, sizeof info, "%s · %d CH · %d:%02d", juce::String(song_->type).toUpperCase().toRawUTF8(),
+                          song_->channels, static_cast<int>(std::lround(song_->durationSeconds)) / 60,
+                          static_cast<int>(std::lround(song_->durationSeconds)) % 60);
             context_->set(context_->info, juce::String::fromUTF8(info));
         }
     }
@@ -1411,7 +1518,7 @@ void Screen::frame(double nowMs, float fps)
         changed |= assign(p.stemsTotal, player_.outStemsTotal());
         changed |= assign(p.unserved, player_.outsUnserved());
         changed |= assign(p.toneJack, player_.toneOutput() - 2);
-        changed |= assign(p.muted, player_.muteMask.load() | (player_.soloMask.load() != 0 ? ~player_.soloMask.load() : 0ull));
+        changed |= assign(p.muted, player_.muteMask.load() | (player_.soloMask.load() != 0 ? ~player_.soloMask.load() : std::uint64_t {0}));
         changed |= assign(p.held, padsHeld_ & 0xFFFF);
         changed |= assign(outsShown_, layout_);
         if (static_cast<long>(nowMs / 66.0) != static_cast<long>(outsMeterMs_ / 66.0)) // the meters at 15 Hz
@@ -1479,7 +1586,7 @@ void Screen::frame(double nowMs, float fps)
         context_->set(context_->speed, juce::String("--"));
         context_->set(context_->bpm, juce::String("--"));
         context_->set(context_->title, juce::String("NO MODULE"));
-        context_->set(context_->info, juce::String("PUSH SELECT IN THE LIBRARY"));
+        context_->set(context_->info, juce::String("PUSH SELECT TO LOAD"));
     }
     const auto mode = static_cast<PadMode>(player_.padMode.load());
     context_->set(context_->mode, mode == PadMode::Outs ? 0 : std::min(static_cast<int>(mode), 3));
@@ -1488,7 +1595,7 @@ void Screen::frame(double nowMs, float fps)
     const juce::String pageText = "PAGE " + juce::String(player_.page.load() + 1) + "/" + juce::String(pageCount());
     const int filtered = __builtin_popcountll(player_.filterChannels());
     subs[0] = ! player_.stems() ? juce::String("NO LOOP") : player_.masterFilter.load() ? juce::String("WHOLE MIX") : juce::String(filtered) + " CH";
-    subs[1] = juce::String(__builtin_popcountll(mutes_)) + " MUTED" + (solos_ != 0 ? " +SOLO" : "");
+    subs[1] = solos_ != 0 ? juce::String(__builtin_popcountll(solos_)) + " SOLO" : juce::String(__builtin_popcountll(mutes_)) + " MUTED";
     subs[2] = player_.loopActive() ? juce::String(player_.loopLength()) + " ROWS" + (player_.loopLatched() ? " HOLD" : "")
                                    : (player_.patternLoop.load() ? juce::String("PATTERN") : juce::String("OFF"));
     subs[3] = mode == PadMode::Kit ? pageText : "INST " + juce::String(player_.instrument.load() + 1);
@@ -1499,7 +1606,7 @@ void Screen::frame(double nowMs, float fps)
             routed += layout_.dest[static_cast<std::size_t>(c)] != outs::kMain ? 1 : 0;
         subs[0] = player_.outsUnserved() != 0 ? juce::String("POOL FULL") : juce::String(routed) + " CH OUT";
     }
-    if (mode == PadMode::Filter || mode == PadMode::Mute || mode == PadMode::Outs)
+    if ((mode == PadMode::Filter || mode == PadMode::Mute || mode == PadMode::Outs) && pageCount() > 1)
     {
         const std::size_t i = mode == PadMode::Outs ? 0 : static_cast<std::size_t>(mode);
         subs[i] = subs[i] + " " + kDot + " P" + juce::String(player_.page.load() + 1);
@@ -1536,8 +1643,8 @@ void Screen::frame(double nowMs, float fps)
     knobs_->set(3, static_cast<float>(ip) / 8.0f, interp[ip >= 8 ? 3 : ip >= 4 ? 2 : ip >= 2 ? 1 : 0]);
     std::snprintf(t, sizeof t, "%+.1f DB", static_cast<double>(player_.gainDb.load()));
     knobs_->set(4, (player_.gainDb.load() + 24.0f) / 36.0f, t);
-    static const char* const views[] = {"AUTO", "FULL", "MEDIUM", "COMPACT", "RAIN"};
-    knobs_->set(5, static_cast<float>(density_) / 4.0f, views[static_cast<int>(density_)]);
+    static const char* const views[] = {"AUTO", "FULL", "WIDE", "MEDIUM", "COMPACT", "RAIN"};
+    knobs_->set(5, static_cast<float>(density_) / 5.0f, views[static_cast<int>(density_)]);
 
     if (view_ == View::Player)
         buildRain(nowMs);
@@ -1545,7 +1652,7 @@ void Screen::frame(double nowMs, float fps)
 
 // The pattern rain: the rows fall from the top onto the playhead line, flare in their instrument's colour as they cross
 // it, and fade into a trail below. Columns are the module's channels (from the pads' page on, when they do not all fit).
-void Screen::buildRain(double)
+void Screen::buildRain(double nowMs)
 {
     rects_.clear();
     glyphs_.clear();
@@ -1563,39 +1670,50 @@ void Screen::buildRain(double)
             frac = std::clamp(static_cast<double>(now - start) / 1e9 / std::max(0.01, player_.rowSeconds()), 0.0, 1.0);
     }
 
-    // Density: characters per channel column.
-    constexpr float kCharW = 7, kRowH = 14, kGlyphW = 8, kHeadH = 18;
-    static constexpr int widthOf[] = {0, 14, 6, 3, 1};
-    const auto columnW = [&](int density) { return density == 4 ? 12.0f : static_cast<float>(widthOf[density]) * kCharW + 7.0f; };
+    // Geometry (LCD px): the glyphs at 1:1 on whole pixels; a row-number gutter on the left, the channel columns
+    // (centred), a header per column (number, name, level with peak hold).
+    constexpr float kCharW = kGlyphW, kRowH = kGlyphH, kHeadH = 26, kGutterW = 3 * kCharW + 8;
+    // Per density: full (note instrument volume effect), wide (note instrument effect), medium (note instrument),
+    // compact (note), rain (one character).
+    static constexpr int widthOf[] = {0, 14, 10, 6, 3, 1}; // characters per column
+    static constexpr float gapOf[] = {0, 8, 8, 8, 5, 4};   // and the space between columns
+    const auto columnW = [&](int density) { return static_cast<float>(widthOf[density]) * kCharW + gapOf[density]; };
+    const float areaW = kRainW - kGutterW;
     int density = static_cast<int>(density_);
     if (density_ == Density::Auto)
     {
-        density = 4;
-        for (int k = 1; k <= 4; ++k)
-            if (static_cast<float>(d.channels) * columnW(k) <= kRainW)
+        density = 5;
+        for (int k = 1; k <= 5; ++k)
+            if (static_cast<float>(d.channels) * columnW(k) <= areaW)
             {
                 density = k;
                 break;
             }
     }
     const float colW = columnW(density);
-    const int visible = std::max(1, static_cast<int>(kRainW / colW));
+    const int visible = std::max(1, static_cast<int>(areaW / colW));
     const auto mode = static_cast<PadMode>(player_.padMode.load());
     const int padFirst = (mode == PadMode::Filter || mode == PadMode::Mute || mode == PadMode::Outs) ? player_.page.load() * 16 : 0;
     int first = 0;
     if (d.channels > visible)
         first = std::clamp(padFirst, 0, d.channels - visible);
     const int last = std::min(d.channels, first + visible);
-    const float x0 = kRainX + std::max(0.0f, (kRainW - colW * static_cast<float>(last - first)) / 2.0f);
+    // The gutter and the columns as one block, centred.
+    const float gutterX = std::round(kRainX + std::max(0.0f, (areaW - colW * static_cast<float>(last - first)) / 2.0f));
+    const float x0 = gutterX + kGutterW;
+    const auto columnX = [&](int ch) { return x0 + std::round(colW * static_cast<float>(ch - first)); };
 
     const std::uint64_t solo = player_.soloMask.load(), mutes = player_.muteMask.load();
     const std::uint64_t filtered = player_.filterChannels();
     const int rpb = std::max(1, player_.rowsPerBeat.load());
 
-    // Geometry: the playhead at 62 % of the rows area; future rows above, the trail below.
+    // The playhead at 62 % of the rows area; future rows fall from above, the trail below.
     const float top = kRainY + kHeadH, bottom = kRainY + kRainH;
-    const float playY = top + (bottom - top) * 0.62f;
+    const float playY = std::round(top + (bottom - top) * 0.62f);
     const int above = static_cast<int>((playY - top) / kRowH) + 2, below = static_cast<int>((bottom - playY) / kRowH) + 1;
+
+    // The playhead band (under the glyphs): where each row is when it plays.
+    rects_.push_back({kRainX, playY, kRainW, kRowH, argb(kBand, 1.0f)});
 
     // Row k (0 = the current row, > 0 = future): its pattern and row, walking the order list.
     auto locate = [&](int k, int& pattern, int& row) -> bool {
@@ -1636,108 +1754,158 @@ void Screen::buildRain(double)
         return false;
     };
 
-    // Columns: header (channel number, level) and a faint glow with the level.
+    // Column headers: number and name in the channel's ink (the pad colour while on the pads; orange through the filter;
+    // grey muted; white solo), a level bar with a peak tick that holds for a moment, and faint separators.
+    const double dt = lastRainMs_ > 0 ? std::clamp((nowMs - lastRainMs_) / 1000.0, 0.0, 0.2) : 0.0;
+    lastRainMs_ = nowMs;
     for (int ch = first; ch < last; ++ch)
     {
-        const float x = x0 + colW * static_cast<float>(ch - first);
+        const float x = columnX(ch);
         const float level = std::sqrt(std::clamp(player_.channelLevel(ch), 0.0f, 1.0f));
         const bool muted = (mutes & bit(ch)) || (solo != 0 && ! (solo & bit(ch)));
+        const bool soloed = solo & bit(ch);
         const bool filt = filtered & bit(ch);
         const bool onPads = ch >= padFirst && ch < padFirst + 16 && (mode == PadMode::Filter || mode == PadMode::Mute);
-        const std::uint32_t ink = muted ? kMuted : filt ? kFiltered : onPads ? (theme::kTrack[(ch - padFirst) & 15].base & 0xFFFFFF) : kRain;
+        const std::uint32_t ink = muted ? kMuted : soloed ? kWhite : filt ? kFiltered : onPads ? (theme::kTrack[(ch - padFirst) & 15].base & 0xFFFFFF) : kRain;
+        if (ch > first)
+            rects_.push_back({x, kRainY, 1, kRainH, argb(kSeparator, 1.0f)});
         if (! muted && level > 0.02f)
-            rects_.push_back({x + 1, top, colW - 2, bottom - top, argb(filt ? kFiltered : kRain, 0.06f * level)});
-        rects_.push_back({x + 2, kRainY + 13, (colW - 4) * level, 3, argb(ink, muted ? 0.3f : 0.9f)});
-        char num[16];
-        std::snprintf(num, sizeof num, "%02d", (ch + 1) % 100);
-        const int nChars = density == 4 ? 1 : 2;
-        const char* text = density == 4 ? num + 1 : num;
-        const float tx = x + (colW - kCharW * static_cast<float>(nChars)) / 2.0f;
-        for (int i = 0; i < nChars; ++i)
-            glyphs_.push_back({tx + kCharW * static_cast<float>(i) - 0.5f, kRainY, kGlyphW, 12, text[i], argb(ink, onPads ? 1.0f : 0.6f)});
+            rects_.push_back({x + 1, top, colW - 2, bottom - top, argb(filt ? kFiltered : kRain, 0.035f * level)});
+        // The peak: holds 0.6 s, then falls at 1.2 per second.
+        auto& peak = peakHold_[static_cast<std::size_t>(ch)];
+        auto& held = peakHeldMs_[static_cast<std::size_t>(ch)];
+        if (level >= peak)
+            peak = level, held = nowMs;
+        else if (nowMs - held > 600)
+            peak = std::max(level, peak - static_cast<float>(1.2 * dt));
+        const float barX = x + 3, barW = colW - 6, barY = kRainY + kGlyphH + 4;
+        rects_.push_back({barX, barY, barW, 3, argb(kSeparator, 1.0f)});
+        rects_.push_back({barX, barY, std::round(barW * level), 3, argb(ink, muted ? 0.35f : 0.9f)});
+        if (peak > 0.03f && ! muted)
+            rects_.push_back({barX + std::round((barW - 2) * peak), barY - 1, 2, 5, argb(kWhite, 0.8f)});
+        // "01 Name", as much as the column holds (the number alone in narrow columns).
+        char text[24];
+        const int chars = widthOf[density];
+        std::snprintf(text, sizeof text, "%02d", (ch + 1) % 100);
+        std::string label = density == 5 ? std::string(text + 1) : std::string(text);
+        if (chars >= 6 && static_cast<std::size_t>(ch) < d.channelNames.size())
+        {
+            std::string name;
+            for (char v : d.channelNames[static_cast<std::size_t>(ch)])
+                name += (v >= 32 && v < 127) ? v : '?';
+            while (! name.empty() && name.back() == ' ')
+                name.pop_back();
+            if (! name.empty())
+                label += " " + name;
+        }
+        if (static_cast<int>(label.size()) > chars)
+            label.resize(static_cast<std::size_t>(chars));
+        const float tx = density >= 4 ? std::round(x + (colW - kCharW * static_cast<float>(label.size())) / 2.0f) : x + std::round(gapOf[density] / 2);
+        for (std::size_t i = 0; i < label.size(); ++i)
+            glyphs_.push_back({tx + kCharW * static_cast<float>(i), kRainY, kCharW, kRowH,
+                               soloed || (onPads && i < 2) ? static_cast<char>(label[i] | kBold) : label[i],
+                               argb(ink, muted ? 0.6f : onPads || soloed ? 1.0f : 0.8f)});
     }
+    rects_.push_back({kRainX, top - 3, kRainW, 1, argb(kSeparator, 1.0f)});
 
-    // Rows.
+    // Rows: the row number in the gutter, a line at each beat (stronger at each bar of 4 beats), the cells by field:
+    // note (bold), instrument (its colour), volume, effect; dots faint. Rows coming are full strength for 8 rows,
+    // then fade to 45 %; at the playhead they flare in their instrument's colour; the trail fades to 35 %.
     for (int k = -below; k <= above; ++k)
     {
         int pattern = 0, row = 0;
         if (! locate(k, pattern, row))
             continue;
         const float dist = static_cast<float>(k) - static_cast<float>(frac); // > 0 future, < 0 past
-        const float y = playY - dist * kRowH;
+        const float y = std::round(playY - dist * kRowH);
         if (y < top - 1 || y + kRowH > bottom + 1)
             continue;
-        if (row % rpb == 0)
-            rects_.push_back({kRainX, y, kRainW, 1, argb(kRain, row % (rpb * 4) == 0 ? 0.16f : 0.07f)});
+        const bool beat = row % rpb == 0, bar = row % (rpb * 4) == 0;
+        if (beat)
+            rects_.push_back({kRainX, y, kRainW, 1, argb(kRain, bar ? 0.22f : 0.10f)});
+        float fade;
+        float glow = 0;
+        if (dist > 0)
+            fade = dist <= 8 ? 1.0f : std::max(0.45f, 1.0f - 0.05f * (dist - 8));
+        else
+        {
+            const float t = -dist;
+            glow = std::exp(-t / 2.2f);
+            fade = std::max(0.35f, std::exp(-t / 6.0f));
+        }
+        // The gutter: decimal row numbers, brighter on beats, white at the playhead.
+        {
+            char num[8];
+            std::snprintf(num, sizeof num, "%3d", row);
+            const bool current = k == 0;
+            const std::uint32_t ink = current ? kWhite : bar ? kRain : beat ? kGutterBeat : kGutter;
+            for (int i = 0; i < 3; ++i)
+                if (num[i] != ' ')
+                    glyphs_.push_back({gutterX + kCharW * static_cast<float>(i), y, kCharW, kRowH,
+                                       current ? static_cast<char>(num[i] | kBold) : num[i], argb(ink, current ? 1.0f : fade)});
+        }
         for (int ch = first; ch < last; ++ch)
         {
             const Cell* cell = d.cell(pattern, row, ch);
             if (cell == nullptr)
                 continue;
-            const float x = x0 + colW * static_cast<float>(ch - first) + 4;
+            const float x = columnX(ch) + std::round(gapOf[density] / 2);
             const bool muted = (mutes & bit(ch)) || (solo != 0 && ! (solo & bit(ch)));
             const bool filt = filtered & bit(ch);
             const bool hasNote = cell->noteValue != 0;
-            // Colour and strength by distance from the playhead.
-            std::uint32_t noteInk = kRain, restInk = kRainDim;
-            float noteA, restA;
-            if (dist > 0) // falling
+            const bool noteOff = cell->noteValue > 120;
+            std::uint32_t noteInk = noteOff ? kNoteOff : kNote;
+            std::uint32_t instInk = mix(instrumentColour(cell->instrument), kWhite, 0.3f);
+            std::uint32_t volInk = kVol, fxInk = kFx;
+            if (glow > 0.05f && hasNote && ! noteOff) // the flare
             {
-                noteA = std::max(0.18f, 0.75f - 0.045f * dist);
-                restA = std::max(0.10f, 0.40f - 0.03f * dist);
-            }
-            else // the flare at the playhead, then the trail
-            {
-                const float t = -dist;
-                const float glow = std::exp(-t / 2.2f);
-                noteInk = mix(kRain, mix(instrumentColour(cell->instrument), kWhite, 0.35f * glow), glow);
-                noteA = 0.25f + 0.75f * glow;
-                restA = 0.18f + 0.4f * glow;
-                restInk = mix(kRainDim, kRain, glow);
-                if (hasNote && t < 1.0f && ! muted)
-                    rects_.push_back({x - 3, y, colW - 2, kRowH, argb(noteInk, 0.22f * (1.0f - t))});
+                noteInk = mix(noteInk, mix(instrumentColour(cell->instrument), kWhite, 0.45f), glow);
+                if (-dist < 1.0f && ! muted)
+                    rects_.push_back({columnX(ch) + 1, y, colW - 2, kRowH, argb(instrumentColour(cell->instrument), 0.30f * (1.0f + dist))});
             }
             if (filt)
-                noteInk = mix(noteInk, kFiltered, 0.7f), restInk = mix(restInk, kFiltered, 0.5f);
+                noteInk = mix(noteInk, kFiltered, 0.6f), instInk = mix(instInk, kFiltered, 0.6f);
+            float a = fade;
             if (muted)
-                noteInk = restInk = kMuted, noteA *= 0.45f, restA *= 0.45f;
-            auto put = [&](float gx, char ch2, bool strong) {
-                if (ch2 == ' ')
+                noteInk = instInk = volInk = fxInk = kMuted, a *= 0.5f;
+            auto put = [&](float gx, char v, std::uint32_t ink, bool bold) {
+                if (v == ' ')
                     return;
-                const bool dot = ch2 == '.';
-                glyphs_.push_back({gx - 0.5f, y, kGlyphW, kRowH, ch2, argb(strong ? noteInk : restInk, dot ? restA * 0.5f : strong ? noteA : restA)});
+                const bool dot = v == '.';
+                glyphs_.push_back({gx, y, kCharW, kRowH, bold && ! dot ? static_cast<char>(v | kBold) : v,
+                                   argb(dot ? kEmpty : ink, a)});
             };
-            if (density == 4)
+            if (density == 5)
             {
-                put(x, hasNote ? (cell->noteValue <= 120 ? cell->note[0] : '|') : (cell->fx[0] != '.' ? ':' : '.'), hasNote);
+                put(x, hasNote ? (noteOff ? '|' : cell->note[0]) : (cell->fx[0] != '.' ? ':' : '.'), hasNote ? noteInk : fxInk, hasNote);
                 continue;
             }
-            char text[16];
-            int n = 0;
+            float gx = x;
             for (char v : cell->note)
-                text[n++] = v;
-            if (density <= 2)
+                put(gx, v, noteInk, true), gx += kCharW;
+            if (density <= 3)
             {
-                text[n++] = ' ';
-                text[n++] = cell->inst[0];
-                text[n++] = cell->inst[1];
+                gx += kCharW;
+                for (char v : cell->inst)
+                    put(gx, v, instInk, false), gx += kCharW;
             }
             if (density == 1)
             {
-                text[n++] = ' ';
+                gx += kCharW;
                 for (char v : cell->vol)
-                    text[n++] = v;
-                text[n++] = ' ';
-                for (char v : cell->fx)
-                    text[n++] = v;
+                    put(gx, v, volInk, false), gx += kCharW;
             }
-            for (int i = 0; i < n; ++i)
-                put(x + kCharW * static_cast<float>(i), text[i], i < 3 && hasNote);
+            if (density <= 2)
+            {
+                gx += kCharW;
+                for (char v : cell->fx)
+                    put(gx, v, fxInk, false), gx += kCharW;
+            }
         }
     }
-    // The playhead: a thin line under the current row's band.
-    overlay_.push_back({kRainX, playY + kRowH, kRainW, 1, argb(kWhite, 0.35f)});
-    overlay_.push_back({kRainX, playY, kRainW, kRowH, argb(kWhite, 0.04f)});
+    // The playhead's edges.
+    overlay_.push_back({kRainX, playY - 1, kRainW, 1, argb(kRain, 0.55f)});
+    overlay_.push_back({kRainX, playY + kRowH, kRainW, 1, argb(kRain, 0.55f)});
     if (! playing)
         overlay_.push_back({kRainX, top, kRainW, bottom - top, argb(0x0B0D10, 0.35f)}); // paused: dimmed
 }

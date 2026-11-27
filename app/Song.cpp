@@ -67,6 +67,29 @@ Stem::~Stem() = default;
 Song::Song() = default;
 Song::~Song() = default;
 
+bool probeModule(const std::string& path, ModuleInfo& info)
+{
+    std::ifstream in(path, std::ios::binary);
+    if (! in)
+        return false;
+    const std::vector<char> bytes((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    try
+    {
+        std::ostringstream quiet; // the loader's warnings are for the real load
+        const std::map<std::string, std::string> ctls {{"load.skip_samples", "1"}, {"load.skip_plugins", "1"}};
+        openmpt::module m(bytes, quiet, ctls);
+        info.type = m.get_metadata("type");
+        info.title = m.get_metadata("title");
+        info.channels = m.get_num_channels();
+        info.seconds = m.get_duration_seconds();
+        return true;
+    }
+    catch (...)
+    {
+        return false;
+    }
+}
+
 bool looksLikeModule(const std::string& fileName)
 {
     const auto dot = fileName.rfind('.');

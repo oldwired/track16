@@ -24,10 +24,12 @@ Quit before pulling the stick: the menu and the app write their logs to it.
 
 ## Screens
 
-- **LIBRARY**: every module on the stick. Turn SELECT to choose, push SELECT to load it (PLAY starts it).
-- **PLAYER**: the pattern rain. The rows fall onto the playhead line, flare in their instrument's colour as they
-  cross it, and fade into a trail. Column headers show each channel's level; muted channels are grey, filtered ones
-  orange. The context bar shows order, row, speed, BPM, the title and the pad modes. In the OUTS pad mode the body
+- **LIBRARY**: every module on the stick, with its title, format, channels and length (read in the background).
+  Turn SELECT to choose, push SELECT to load it (PLAY starts it).
+- **PLAYER**: the pattern rain. The rows fall onto the playhead band, flare in their instrument's colour as they
+  cross it, and fade into a trail. Tracker colours: the note bright, the instrument in its colour, the volume green,
+  the effect amber; row numbers on the left, a line at each beat and a stronger one at each bar. Column headers show
+  each channel's number, name and level with a peak; muted channels are grey, solo white, filtered ones orange. The context bar shows order, row, speed, BPM, the title and the pad modes. In the OUTS pad mode the body
   shows the OUTS page instead (below).
 
 BACK switches between them (HOME: the library).
@@ -48,12 +50,13 @@ An interactive map of the panel with every control: [oldwired.github.io/track16]
 | SHIFT + BAR 1–4 | The pads' page: channels (or instruments) 1–16, 17–32, 33–48, 49–64. While SHIFT is held the BAR lamps show the pages (lit: shown, blinking: there) |
 | REC | MIDI notes out on/off (module channels 1–16 → MIDI channels 1–16) |
 | ANALOG FILTER ACTIVE | The whole mix through the analog filter (the board in the main output's path) |
-| Knobs 1–6 | TEMPO (SHIFT: 100 %; with a MIDI clock: rows per beat, below), PITCH (SHIFT: 0), STEREO separation, INTERPolation, GAIN (SHIFT: 0 dB), VIEW (rain density) |
+| Knobs 1–6 | TEMPO (SHIFT: 100 %; with a MIDI clock: rows per beat, below), PITCH (SHIFT: 0), STEREO separation, INTERPolation, GAIN (SHIFT: 0 dB), VIEW (the rain: AUTO, FULL = note instrument volume effect, WIDE = note instrument effect, MEDIUM = note instrument, COMPACT = note, RAIN = one character; AUTO takes the most that fits) |
 | MAIN VOLUME | Output level |
 | Touch strip | Acts by its mode while touched (below); HOLD keeps the last value after you let go |
 | Strip MODE | PITCH: pitch bend ±12 semitones · REPEAT: stutter loop, 1 row at the top … 16 rows at the bottom, returns in time · USER1: tempo bend ±8 % · USER2: volume (top full, bottom silent) |
 | DRIVE | 0…+12 dB into the analog filter (the stock firmware's curve); OVER lights near the send's full scale |
 | SHIFT + BACK | Quit to the boot menu |
+| SHIFT + HOME | Screenshot of the screen as it is, to `track16-data/track16/screenshots/track16-NNN.png` on the stick |
 
 ### Pad modes (the four keys below the pads)
 
@@ -228,9 +231,12 @@ MAIN too.
 git submodule update --init --depth 1   # JUCE 9.0.6
 scripts/build-unit.sh                   # → out/track16 for the stick
 scripts/test-host.sh ../modules         # engine tests with a folder of modules
+scripts/preview.sh ../modules a.mod     # the screen as PNG files in out/preview/ (library, player, MUTE, OUTS)
 ```
 
 `scripts/build-unit.sh` needs Docker (Colima works); the first run builds the cross toolchain (about 30 minutes).
+`scripts/preview.sh` runs the real screen and player headless on the build machine and draws what the unit's display
+would show (in its 16-bit colour), to check the look without a unit (`tools/preview.cpp`).
 
 **Releases**: set `APP_VERSION` in CMakeLists.txt, then tag and push (`git tag v0.2.0 && git push origin v0.2.0`).
 CI builds the binary and creates a draft release with it, the checksum and the commits since the last tag; add the
@@ -244,12 +250,14 @@ highlights and publish it on GitHub.
 | `app/Song.*` | Loading a module: the libopenmpt instances ("dry", the filter's "wet", the single outs' pool) and a snapshot of the pattern data |
 | `app/Outs.*` | The single outs' layout: destinations, jack sources, the text form, the assignment rules |
 | `app/Screen.*` | The UI: library, player, context bar, knob strip, the rain, the controls and the lamps |
-| `app/GlDisplay.*` | OpenGL ES output: the rain's rectangles and glyphs (an atlas built from the app font) under the UI |
+| `app/GlDisplay.*` | OpenGL ES output: the rain's rectangles and glyphs under the UI; screenshots |
+| `app/GlyphAtlas.*` | The rain's characters: JetBrains Mono Medium and Bold at 8 × 15 pixels, drawn 1:1 |
 | `app/Midi.*` | MIDI in and the timed MIDI out |
 | `app/Library.*` | The module files on the stick |
 | `hw/` | The SP-16 hardware layer from juce-app-template (keep changes small) |
 | `third_party/libopenmpt` | libopenmpt 0.8.10 with a small extension: positions without seeking, silent channels (see `VENDORED.md`) |
 | `tests/` | Host tests of the engine |
+| `tools/preview.cpp` | The screen as PNG files on a build machine (`scripts/preview.sh`) |
 
 ## Based on juce-app-template
 
@@ -259,7 +267,8 @@ remote `template` (`git pull template main` merges its fixes). Its documentation
 
 ## Licence
 
-GPL-3.0 (see `LICENSE`). JUCE is used under its free licence, AGPLv3. libopenmpt is BSD-3-Clause. Distributed
+GPL-3.0 (see `LICENSE`). JUCE is used under its free licence, AGPLv3. libopenmpt is BSD-3-Clause. The fonts Inter
+and JetBrains Mono are under the SIL Open Font License 1.1 (`resources/fonts/`). Distributed
 binaries come with their complete source.
 
 An independent community project, not affiliated with or endorsed by Pioneer DJ or AlphaTheta. TORAIZ and SP-16 are

@@ -20,6 +20,7 @@
 #include <juce_gui_basics/juce_gui_basics.h>
 
 #include <array>
+#include <atomic>
 #include <condition_variable>
 #include <cstdint>
 #include <functional>
@@ -38,6 +39,10 @@ struct SceneRect
     float x, y, w, h;
     std::uint32_t argb;
 };
+// A character of the glyph atlas (printable ASCII in JetBrains Mono, kGlyphW × kGlyphH texels, drawn 1:1 at whole
+// pixels): ch | kBold for the bold face.
+constexpr int kGlyphW = 8, kGlyphH = 15;
+constexpr unsigned char kBold = 0x80;
 struct SceneGlyph
 {
     float x, y, w, h;
@@ -86,6 +91,7 @@ public:
     void start();                                   // after audio started: scan the stick, autoplay
 
     std::function<void()> onQuit; // SHIFT + BACK, or ↩ (long) on the screen
+    std::function<void(const std::string&)> onScreenshot; // SHIFT + HOME: the next frame to this PNG file
 
 private:
     struct Canvas;
@@ -95,11 +101,13 @@ private:
     struct KnobStrip;
     struct OutsPage;
     enum class View { Player, Library };
-    enum class Density { Auto, Full, Medium, Compact, Rain };
+    enum class Density { Auto, Full, Wide, Medium, Compact, Rain }; // the rain: 14, 10, 6, 3, 1 characters a column
 
     void setView(View);
     void loadEntry(int index, bool play); // asks the loader thread; frame() takes the result
     void loaderThread();
+    void proberThread(std::vector<std::string> paths); // the library's format, channels and length, in the background
+    void takeProbed();
     void takeLoaded();
     void setPadMode(PadMode mode, bool samePressed);
     int pageCount() const;
@@ -124,6 +132,7 @@ private:
     void loadBeats();
     void saveBeats();
     void buildRain(double nowMs);
+    void screenshot(); // SHIFT + HOME: <dataDir>/screenshots/track16-NNN.png
 
     Player& player_;
     Midi& midi_;
@@ -163,6 +172,11 @@ private:
     LoadJob loadJob_;
     std::unique_ptr<Loaded> loaded_;
     int lastMeasurements_ = 0;
+    // the prober thread
+    std::thread prober_;
+    std::atomic<bool> probeQuit_ {false};
+    std::mutex probeMutex_;
+    std::vector<std::pair<int, ModuleInfo>> probed_; // done since the last frame
     std::array<std::uint16_t, 16> padHits_ {}; // presses per pad, as the player counts them (Player::push)
     bool shift_ = false;
     bool driveSeen_ = false, stripHold_ = false;
@@ -181,6 +195,9 @@ private:
     double lastFrameMs_ = 0, backDownMs_ = -1;
     juce::String statusBase_;
     std::array<double, 16> padHitMs_ {};
+    std::array<float, kMaxChannels> peakHold_ {}; // the rain's level peaks, and when each was reached
+    std::array<double, kMaxChannels> peakHeldMs_ {};
+    double lastRainMs_ = 0;
     // the scene
     std::vector<SceneRect> rects_, overlay_;
     std::vector<SceneGlyph> glyphs_;

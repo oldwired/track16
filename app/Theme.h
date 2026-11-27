@@ -47,6 +47,7 @@ inline juce::Colour track(int track1Based, bool dim = false)
 // ---- type (tokens.json typography.*): Inter; caps styles are written in upper case by the caller ----
 enum class Text { Caption, Label, Body, BodyStrong, Title, ValueS, Value, ValueL };
 juce::Font font(Text);
+juce::Font mono(bool bold, float em); // JetBrains Mono (Medium / Bold): the pattern rain's glyph atlas
 float lineHeight(Text);
 void installFonts();               // after JUCE's GUI is initialised
 void releaseFonts();               // after every component that uses them

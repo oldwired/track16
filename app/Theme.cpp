@@ -1,6 +1,6 @@
 #include "app/Theme.h"
 
-#include "AppFonts.h" // the embedded Inter faces (juce_add_binary_data in CMakeLists.txt)
+#include "AppFonts.h" // the embedded Inter and JetBrains Mono faces (juce_add_binary_data in CMakeLists.txt)
 
 #include <algorithm>
 #include <cmath>
@@ -11,7 +11,7 @@ namespace
 {
 struct Faces
 {
-    juce::Typeface::Ptr regular, medium, semibold;
+    juce::Typeface::Ptr regular, medium, semibold, mono, monoBold;
 };
 Faces& faces()
 {
@@ -49,12 +49,16 @@ constexpr Style kStyles[] = {{11, 14, 600, 0.06f}, {13, 16, 600, 0.04f}, {15, 20
 const Style& style(Text t) { return kStyles[static_cast<int>(t)]; }
 } // namespace
 
+juce::Font mono(bool bold, float em) { return make(bold ? faces().monoBold : faces().mono, em); }
+
 void installFonts()
 {
     auto& f = faces();
     f.regular = juce::Typeface::createSystemTypefaceFor(AppFonts::InterRegular_subset_ttf, AppFonts::InterRegular_subset_ttfSize);
     f.medium = juce::Typeface::createSystemTypefaceFor(AppFonts::InterMedium_subset_ttf, AppFonts::InterMedium_subset_ttfSize);
     f.semibold = juce::Typeface::createSystemTypefaceFor(AppFonts::InterSemiBold_subset_ttf, AppFonts::InterSemiBold_subset_ttfSize);
+    f.mono = juce::Typeface::createSystemTypefaceFor(AppFonts::JetBrainsMonoNLMedium_subset_ttf, AppFonts::JetBrainsMonoNLMedium_subset_ttfSize);
+    f.monoBold = juce::Typeface::createSystemTypefaceFor(AppFonts::JetBrainsMonoNLBold_subset_ttf, AppFonts::JetBrainsMonoNLBold_subset_ttfSize);
     laf() = std::make_unique<InterLookAndFeel>();
 }
 

@@ -1,5 +1,7 @@
 #include "app/GlDisplay.h"
 
+#include "app/GlyphAtlas.h"
+#include "app/Log.h"
 #include "app/Theme.h"
 
 #include <EGL/egl.h>
@@ -122,8 +124,7 @@ struct GlyphVertex
     float x, y, r, g, b, a, u, v;
 };
 
-// The atlas: printable ASCII 32…126 in 16 × 6 cells of kCellW × kCellH texels.
-constexpr int kCellW = 16, kCellH = 28, kAtlasW = 256, kAtlasH = 256;
+constexpr int kCellW = kGlyphW, kCellH = kGlyphH;
 
 // After the app quits, the framebuffer may still show its second buffer: pan back so whatever runs next (the boot menu)
 // starts from a known state.
@@ -175,6 +176,33 @@ struct GlDisplay::Impl
     DirtyAreas* dirty = nullptr; // owned by the root component
     juce::Image image {juce::Image::ARGB, Screen::kWidth, Screen::kHeight, true, juce::SoftwareImageType()};
     std::vector<Vertex> vertices;
+    std::string capturePath; // the next frame goes there as a PNG (capture())
+
+    // The frame just drawn (before the swap), as the panel shows it: read back, flipped, written as a PNG.
+    void writeCapture(int x, int y, int w, int h)
+    {
+        const std::string path = std::move(capturePath);
+        capturePath.clear();
+        std::vector<std::uint8_t> rgba(static_cast<std::size_t>(w * h * 4));
+        glPixelStorei(GL_PACK_ALIGNMENT, 1);
+        glReadPixels(x, y, w, h, GL_RGBA, GL_UNSIGNED_BYTE, rgba.data());
+        juce::Image shot(juce::Image::RGB, w, h, false, juce::SoftwareImageType());
+        {
+            juce::Image::BitmapData bits(shot, juce::Image::BitmapData::writeOnly);
+            for (int row = 0; row < h; ++row)
+            {
+                const std::uint8_t* src = rgba.data() + static_cast<std::size_t>((h - 1 - row) * w * 4); // GL rows go up
+                for (int col = 0; col < w; ++col, src += 4)
+                    bits.setPixelColour(col, row, juce::Colour(src[0], src[1], src[2]));
+            }
+        }
+        const juce::File file(path);
+        file.deleteFile();
+        juce::FileOutputStream out(file);
+        juce::PNGImageFormat png;
+        const bool ok = out.openedOk() && png.writeImageToStream(shot, out);
+        logLine("SCREENSHOT %s %s (%dx%d)", ok ? "written" : "FAILED", path.c_str(), w, h);
+    }
 
     bool fail(std::string& error, const char* what)
     {
@@ -263,8 +291,8 @@ struct GlDisplay::Impl
             for (std::size_t k = from; k < from + count; ++k)
             {
                 const auto& q = list[k];
-                const int index = std::clamp(static_cast<int>(q.ch) - 32, 0, 94);
-                const float u0 = static_cast<float>((index % 16) * kCellW) / kAtlasW, v0 = static_cast<float>((index / 16) * kCellH) / kAtlasH;
+                const auto cell = glyphCell(q.ch);
+                const float u0 = static_cast<float>(cell.x) / kAtlasW, v0 = static_cast<float>(cell.y) / kAtlasH;
                 const float u1 = u0 + static_cast<float>(kCellW) / kAtlasW, v1 = v0 + static_cast<float>(kCellH) / kAtlasH;
                 float r, g, b, a;
                 unpack(q.argb, r, g, b, a);
@@ -285,21 +313,10 @@ struct GlDisplay::Impl
         glDisableVertexAttribArray(2);
     }
 
-    // The glyph atlas, drawn once with JUCE (the app's Inter font, centred in each cell).
-    void buildAtlas(const juce::Font& font)
+    // The glyph atlas (app/GlyphAtlas.h), uploaded once.
+    void buildAtlas()
     {
-        juce::Image img(juce::Image::ARGB, kAtlasW, kAtlasH, true, juce::SoftwareImageType());
-        {
-            juce::Graphics g(img);
-            g.setColour(juce::Colours::white);
-            g.setFont(font);
-            for (int c = 32; c < 127; ++c)
-            {
-                const int i = c - 32;
-                const juce::Rectangle<int> cell((i % 16) * kCellW, (i / 16) * kCellH, kCellW, kCellH);
-                g.drawFittedText(juce::String::charToString(static_cast<juce::juce_wchar>(c)), cell, juce::Justification::centred, 1, 0.5f);
-            }
-        }
+        const juce::Image img = glyphAtlas();
         const juce::Image::BitmapData bits(img, juce::Image::BitmapData::readOnly);
         std::vector<std::uint8_t> rgba(static_cast<std::size_t>(kAtlasW * kAtlasH * 4));
         for (int y = 0; y < kAtlasH; ++y)
@@ -387,7 +404,7 @@ bool GlDisplay::open(const platform::RendererEnv& env, std::string_view flavour,
         return false;
     d.glyphScreen = glGetUniformLocation(d.glyphs, "uScreen");
     d.glyphSampler = glGetUniformLocation(d.glyphs, "uAtlas");
-    d.buildAtlas(theme::font(theme::Text::ValueS).withHeight(22.0f));
+    d.buildAtlas();
     d.flatScreen = glGetUniformLocation(d.flat, "uScreen");
     d.uiSampler = glGetUniformLocation(d.ui, "uUi");
     glGenTextures(1, &d.texture);
@@ -442,8 +459,12 @@ bool GlDisplay::draw(const SceneInput& s)
     glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, quad);
     glEnableVertexAttribArray(0);
     glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    if (! d.capturePath.empty())
+        d.writeCapture((d.width - w) / 2, (d.height - h) / 2, w, h);
     return eglSwapBuffers(d.display, d.surface) != 0; // waits for vsync (swap interval 1)
 }
+
+void GlDisplay::capture(const std::string& pngPath) { impl_->capturePath = pngPath; }
 
 std::string GlDisplay::describe() const
 {
