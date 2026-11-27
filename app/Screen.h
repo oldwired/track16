@@ -23,6 +23,7 @@
 #include <condition_variable>
 #include <cstdint>
 #include <functional>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -60,6 +61,7 @@ struct ScreenConfig
     int outStems = 4;               // instances for the single outs (out_stems)
     std::string outsDefault;        // the single outs' layout for modules without their own (outs=, app/Outs.h)
     std::string dataDir;            // per-module layouts go to <dataDir>/outs/
+    int rowsPerBeat = 0;            // rows per MIDI beat for modules without their own choice; 0: auto (beatAuto)
 };
 
 class Screen final : public juce::Component
@@ -113,6 +115,14 @@ private:
     void outsStep(int step0, double nowMs); // a STEP key in the OUTS pad mode
     void outsTouch(juce::Point<float> at, double nowMs);
     bool outsVisible() const;
+    // rows per MIDI beat: auto from the module's first row, or the one chosen with TEMPO (saved per module in
+    // <dataDir>/rows_per_beat.txt)
+    int beatAuto(const SongData&) const;
+    void applyBeat(const SongData&);
+    void stepBeat(int dir, bool backToAuto);
+    bool beatKnob() const; // TEMPO sets the rows per beat: following a clock, or one comes in
+    void loadBeats();
+    void saveBeats();
     void buildRain(double nowMs);
 
     Player& player_;
@@ -164,6 +174,9 @@ private:
     outs::Layout layout_, outsShown_;
     std::string layoutFile_;
     bool layoutDirty_ = false;
+    std::map<std::string, int> beats_; // module file name → rows per beat chosen with TEMPO
+    bool beatsDirty_ = false;
+    double beatsSaveMs_ = 0;
     double layoutSaveMs_ = 0, outsMeterMs_ = 0;
     double lastFrameMs_ = 0, backDownMs_ = -1;
     juce::String statusBase_;

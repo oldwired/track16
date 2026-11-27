@@ -147,7 +147,15 @@ public:
     std::atomic<float> gainDb {0.0f};      // module gain
     std::atomic<float> mainVolume {1.0f};  // the MAIN VOLUME pot, 0…1
     std::atomic<int> stereoSeparation {100}, interpolation {8};
-    std::atomic<int> rowsPerBeat {4};
+    std::atomic<int> rowsPerBeat {4};      // rows per MIDI beat: the clock, the beat quantize, the BPM shown
+    static constexpr int kRowsPerBeat[] = {1, 2, 3, 4, 6, 8, 12}; // 24 pulses split evenly
+    static int validRowsPerBeat(int n) noexcept
+    {
+        for (int v : kRowsPerBeat)
+            if (v == n)
+                return n;
+        return 4;
+    }
     std::atomic<bool> midiClock {true}, midiNotes {false}, midiFollowMute {true};
     std::atomic<int> midiOffsetMs {0};
     // MIDI in: what notes play (by channel: module channel n's voice; the selected instrument; nothing), the kit and
@@ -348,7 +356,7 @@ private:
     enum Arm : int { ArmNone, ArmStart, ArmContinue, ArmJoin };
     int syncArm_ = ArmNone, syncPort_ = -1;
     std::uint64_t pulseRawNs_ = 0;
-    double pulseNs_ = 0, pulsePeriod_ = 0, gridNs_ = 0;
+    double pulseNs_ = 0, pulsePeriod_ = 0;
     long pulseIndex_ = 0, gridOrigin_ = 0;
     float syncFactor_ = 1.0f;
     double syncIntegral_ = 0;

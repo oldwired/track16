@@ -86,6 +86,53 @@ bool looksLikeModule(const std::string& fileName)
     return prefix == "mod" || prefix == "xm" || prefix == "s3m" || prefix == "it";
 }
 
+// A typical row's length: the average over the first pattern played, following its speed and tempo commands row by
+// row (many modules set them on row 0 instead of in the header, some alternate speeds for a swing or start slower).
+// Classic tempo mode: a row is speed × 2.5 / tempo seconds; the others scale the same way. Pattern delays are ignored.
+static double typicalRowSeconds(openmpt::module& m, openmpt::ext::track16_position& p)
+{
+    const double header = p.get_row_seconds();
+    const int speed0 = m.get_current_speed();
+    const double tempo0 = m.get_current_tempo2();
+    if (header <= 0 || speed0 <= 0 || tempo0 <= 0)
+        return header;
+    int pattern = -1;
+    for (int o = 0; o < m.get_num_orders() && pattern < 0; ++o)
+        if (! m.is_order_skip_entry(o) && ! m.is_order_stop_entry(o))
+            pattern = m.get_order_pattern(o);
+    const int rows = pattern < 0 ? 0 : m.get_pattern_num_rows(pattern);
+    if (rows <= 0)
+        return header;
+    // The effect letters are in the module's own notation: MOD-like (Fxx: speed below 20h, else tempo) or S3M-like
+    // (Axx speed, Txx tempo from 20h; below are slides).
+    const std::string type = m.get_metadata("type");
+    const bool s3mLike = type == "s3m" || type == "it" || type == "mptm" || type == "stm" || type == "stx" || type == "ult"
+                      || type == "psm" || type == "ptm" || type == "dsm" || type == "okt" || type == "imf" || type == "far";
+    int speed = speed0;
+    double tempo = tempo0, sum = 0;
+    for (int r = 0; r < rows; ++r)
+    {
+        for (int c = 0; c < m.get_num_channels(); ++c)
+        {
+            using M = openmpt::module;
+            const int param = m.get_pattern_row_channel_command(pattern, r, c, M::command_parameter);
+            if (param <= 0)
+                continue;
+            const std::string fx = m.format_pattern_row_channel_command(pattern, r, c, M::command_effect);
+            if (fx.empty())
+                continue;
+            if (! s3mLike && fx[0] == 'F')
+                (param < 0x20 ? speed = param : tempo = param);
+            else if (s3mLike && fx[0] == 'A')
+                speed = param;
+            else if (s3mLike && fx[0] == 'T' && param >= 0x20)
+                tempo = param;
+        }
+        sum += header * (static_cast<double>(speed) / speed0) * (tempo0 / tempo);
+    }
+    return sum / rows;
+}
+
 std::unique_ptr<Song> loadSong(const std::string& path, bool stems, int outStems, int sampleRate, int stereoSeparation, int interpolation,
                                std::string& error)
 {
@@ -151,6 +198,7 @@ std::unique_ptr<Song> loadSong(const std::string& path, bool stems, int outStems
     d->numInstruments = m.get_num_instruments();
     d->numSamples = m.get_num_samples();
     d->durationSeconds = m.get_duration_seconds();
+    d->rowSeconds = typicalRowSeconds(m, *song->dry.p);
     d->instrumentNames = d->numInstruments > 0 ? m.get_instrument_names() : m.get_sample_names();
     d->channelNames = m.get_channel_names();
     if (d->title.empty())

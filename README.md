@@ -48,7 +48,7 @@ An interactive map of the panel with every control: [oldwired.github.io/track16]
 | SHIFT + BAR 1–4 | The pads' page: channels (or instruments) 1–16, 17–32, 33–48, 49–64. While SHIFT is held the BAR lamps show the pages (lit: shown, blinking: there) |
 | REC | MIDI notes out on/off (module channels 1–16 → MIDI channels 1–16) |
 | ANALOG FILTER ACTIVE | The whole mix through the analog filter (the board in the main output's path) |
-| Knobs 1–6 | TEMPO (SHIFT: 100 %), PITCH (SHIFT: 0), STEREO separation, INTERPolation, GAIN (SHIFT: 0 dB), VIEW (rain density) |
+| Knobs 1–6 | TEMPO (SHIFT: 100 %; with a MIDI clock: rows per beat, below), PITCH (SHIFT: 0), STEREO separation, INTERPolation, GAIN (SHIFT: 0 dB), VIEW (rain density) |
 | MAIN VOLUME | Output level |
 | Touch strip | Acts by its mode while touched (below); HOLD keeps the last value after you let go |
 | Strip MODE | PITCH: pitch bend ±12 semitones · REPEAT: stutter loop, 1 row at the top … 16 rows at the bottom, returns in time · USER1: tempo bend ±8 % · USER2: volume (top full, bottom silent) |
@@ -132,7 +132,7 @@ Loops, the pattern loop and jumps take effect at a row boundary, so the song nev
 
 ## MIDI
 
-- **Clock**: 24 pulses per beat from the module's actual row timing (`rows_per_beat`, default 4), Start / Stop /
+- **Clock**: 24 pulses per beat from the module's actual row timing (rows per beat: below), Start / Stop /
   Continue, and Song Position Pointer after jumps and pattern-loop repeats. The stutter loop sends neither: it returns
   in time, where a follower counting the clock already is. Sent to the ports `midi_out` selects.
 - **Notes** (REC, or `midi_notes=1`): the notes of module channels 1–16 on MIDI channels 1–16, velocity from the
@@ -143,14 +143,24 @@ Loops, the pattern loop and jumps take effect at a row boundary, so the song nev
 
 - **Following a clock**: send Track16 Start, Continue, Stop and Song Position from a master and it follows: Start
   plays from the top on the next clock pulse, Stop pauses, Song Position moves it (one sixteenth = one row at
-  `rows_per_beat=4`), Continue goes on from there. Pressing PLAY while a clock runs joins it on its next beat. While
+  4 rows per beat), Continue goes on from there. Pressing PLAY while a clock runs joins it on its next beat. While
   it follows, the clock sets the tempo: each row is stretched or squeezed to one grid step of the clock
-  (24 / `rows_per_beat` pulses), with the rows' start at the jacks locked to the pulses (within about a millisecond
+  (24 pulses / rows per beat), with the rows' start at the jacks locked to the pulses (within about a millisecond
   on the build machine, also through the module's own speed changes, which give way to the clock). TEMPO and the
   strip's tempo bend wait meanwhile, the context bar shows **EXT BPM**, and Track16 sends no clock of its own (so it
   never follows itself through a MIDI thru). STOP on the panel ends following. A clock that stops without a Stop
   leaves the song playing at the last tempo (**NO CLOCK** on the TEMPO knob). `midi_sync=0` ignores all of this;
   `midi_sync_offset_ms` moves the rows against the clock.
+- **Rows per beat**: how many rows one beat of the clock is, for the clock in and out, beat-quantized jumps and the
+  BPM on the screen. By default Track16 picks it per module: 4 rows, unless the module's typical row (the first
+  pattern's average, with its speed and tempo commands) would then be faster than 200 BPM (then 8, or 12) or slower
+  than 60 BPM (then 2, or 1). A fast speed-3 module at tempo 130 is 130 BPM at 8 rows per beat, instead of 260 BPM
+  at 4; the BPM on the screen is the one to set on the master. While a clock comes in, the **TEMPO knob** changes it:
+  ×¼, ×½, ×¾, ×1, ×1.5, ×2, ×3 (1, 2, 3, 4, 6, 8, 12 rows per beat), shown as **EXT ×2** on the knob; SHIFT + TEMPO
+  goes back to the automatic choice. It takes effect on the next row, on the same beats. The choice is saved per
+  module (`track16-data/track16/rows_per_beat.txt`). `rows_per_beat=<n>` in track16.conf replaces the automatic
+  choice with a fixed one. The module's tempo can only be stretched up to 4× (or squeezed to ¼), so a slow module may
+  not reach the highest ratios.
 - **Notes** (`midi_in_notes`): by default MIDI channel *n* plays in the voice of module channel *n*: the instrument
   that channel played last (the selected one until it has played), at the note's pitch, where that channel plays
   (MAIN, through the filter, or its single out). `selected` plays the instrument selected for the PLAY pads on every
@@ -186,7 +196,7 @@ autoplay=0           1: play the first module at start
 audio_period=128     audio period in frames (latency); 256 if you hear dropouts
 stereo=100           stereo separation, 0…200 %
 interp=4             interpolation taps: 1 none, 2 linear, 4 cubic, 8 sinc
-rows_per_beat=4      for the MIDI clock and beat-quantized jumps
+rows_per_beat=auto   rows per MIDI beat (clock, beat jumps, BPM): auto per module, or 1, 2, 3, 4, 6, 8, 12
 strip_pitch=12       the PITCH strip's range in semitones each way
 midi_out=all         all, din, usb or none
 midi_clock=1

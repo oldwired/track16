@@ -640,6 +640,7 @@ struct Clock
 {
     Rig& rig;
     double bpm = 120, next = 0; // the next pulse's true time (ns)
+    int ppr = 6;                // pulses per grid row (24 / rows per beat)
     long sent = 0;
     unsigned seed = 1;
     int port = 0;
@@ -666,7 +667,7 @@ struct Clock
             const std::uint64_t start = rig.player.rowStartNs();
             if (start != lastStart && rig.player.playing() && static_cast<double>(rig.ns) > from && gridOrigin >= 0)
             {
-                const double grid = 6 * period();
+                const double grid = ppr * period();
                 double e = std::fmod(static_cast<double>(start) - gridOrigin, grid);
                 e = e > grid / 2 ? e - grid : e < -grid / 2 ? e + grid : e;
                 worst = std::max(worst, std::fabs(e));
@@ -684,7 +685,12 @@ void testSync(const LibraryEntry& e)
     Rig rig(false);
     rig.run(0.05);
     std::string error;
-    rig.player.load(loadSong(e.path, false, 0, kRate, 100, 4, error));
+    auto song = loadSong(e.path, false, 0, kRate, 100, 4, error);
+    if (e.name == "2nd_pm.s3m") // speed 3, tempo 130 in the header
+        CHECK(song && std::fabs(song->data->rowSeconds - 2.5 * 3 / 130) < 1e-4, "typical row %.4f s", song ? song->data->rowSeconds : 0.0);
+    const double rowSeconds = song ? song->data->rowSeconds : 0.0;
+    std::printf("  typical row %.1f ms\n", rowSeconds * 1e3);
+    rig.player.load(std::move(song));
     rig.run(0.05);
     Clock clock {rig};
     clock.next = static_cast<double>(rig.ns) + 1e6;
@@ -711,6 +717,21 @@ void testSync(const LibraryEntry& e)
     CHECK(worst < 3e6 && std::fabs(rig.player.clockBpm() - 141.0f) < 0.5f, "141 BPM: worst %.2f ms, clock %.2f", worst / 1e6,
           static_cast<double>(rig.player.clockBpm()));
     std::printf("  141 BPM: worst %.2f ms over %ld rows\n", worst / 1e6, rows);
+
+    // 8 rows per beat while following (TEMPO with a clock): twice the rows on the same beats, then back to 4.
+    for (const int rpb : {8, 4})
+    {
+        if (rowSeconds * rpb * 141 / 60 > 3.5) // more than the tempo factor's 4× (slow modules: their TEMPO knob stops lower)
+        {
+            std::printf("  %d rows per beat: skipped, %.1f× tempo\n", rpb, rowSeconds * rpb * 141 / 60);
+            continue;
+        }
+        rig.player.rowsPerBeat = rpb;
+        clock.ppr = 24 / rpb;
+        std::tie(worst, rows) = clock.run(6.0, 3.0, true, origin2);
+        CHECK(worst < 3e6, "%d rows per beat: worst %.2f ms", rpb, worst / 1e6);
+        std::printf("  %d rows per beat: worst %.2f ms over %ld rows\n", rpb, worst / 1e6, rows);
+    }
 
     // Stop pauses where it is; Song Position moves it; Continue goes on from there with the next pulse.
     clock.message(0xFC);

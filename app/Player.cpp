@@ -462,11 +462,7 @@ void Player::flushPulses(std::uint64_t frame) noexcept
 
 int Player::pulsesPerRow() const noexcept
 {
-    static constexpr int divisors[] = {1, 2, 3, 4, 6, 8, 12, 24};
-    int rpb = rowsPerBeat.load(std::memory_order_relaxed);
-    if (std::find(std::begin(divisors), std::end(divisors), rpb) == std::end(divisors))
-        rpb = 4;
-    return 24 / rpb;
+    return 24 / validRowsPerBeat(rowsPerBeat.load(std::memory_order_relaxed));
 }
 
 void Player::clockRow(std::uint64_t frame) noexcept
@@ -839,7 +835,7 @@ void Player::realtime(const Realtime& r) noexcept
 }
 
 // A clock pulse: the filtered pulse time and period (a second-order loop that smooths the arrival jitter), the row
-// grid (every pulsesPerRow() pulses from the origin), and an armed start that is due.
+// grid's origin (a beat; rows every pulsesPerRow() pulses from it), and an armed start that is due.
 void Player::syncPulse(std::uint64_t ns, int port) noexcept
 {
     const double t = static_cast<double>(ns);
@@ -880,7 +876,6 @@ void Player::syncPulse(std::uint64_t ns, int port) noexcept
     if (syncPort_ < 0 || ! following_)
         syncPort_ = port;
     ++pulseIndex_;
-    const int ppr = pulsesPerRow();
     if (syncArm_ != ArmNone && following_)
     {
         // Join (PLAY while a clock runs): on the next beat of a known grid, else on this pulse.
@@ -895,8 +890,6 @@ void Player::syncPulse(std::uint64_t ns, int port) noexcept
             startPlaying();
         }
     }
-    if (((pulseIndex_ - gridOrigin_) % ppr + ppr) % ppr == 0)
-        gridNs_ = pulseNs_;
 }
 
 // A row started while following, heard at `audibleNs`: the tempo factor that makes this row end on the clock's grid
@@ -907,11 +900,15 @@ void Player::syncRow(double audibleNs, bool firstTickDone) noexcept
 {
     if (! playingNow_ || pulsePeriod_ <= 0 || song_ == nullptr || ! gridKnown_)
         return;
-    const double gridRow = pulsePeriod_ * pulsesPerRow();
+    const int ppr = pulsesPerRow();
+    const double gridRow = pulsePeriod_ * ppr;
     const double nominal = song_->dry.p->get_row_seconds() * 1e9;
     if (gridRow <= 0 || nominal <= 0)
         return;
-    double e = std::fmod(audibleNs - 1e6 * midiSyncOffsetMs.load(std::memory_order_relaxed) - gridNs_, gridRow);
+    // The last grid point from the latest pulse and the pulses per row now (rows per beat may change while following;
+    // the beats stay where they are, every ratio divides them).
+    const double gridNs = pulseNs_ - static_cast<double>(((pulseIndex_ - gridOrigin_) % ppr + ppr) % ppr) * pulsePeriod_;
+    double e = std::fmod(audibleNs - 1e6 * midiSyncOffsetMs.load(std::memory_order_relaxed) - gridNs, gridRow);
     if (e > 0.5 * gridRow)
         e -= gridRow;
     else if (e < -0.5 * gridRow)
@@ -1860,7 +1857,10 @@ void Player::process(const platform::AudioIO& io) noexcept
     if (song_ != nullptr)
     {
         speed_.store(song_->dry.m->get_current_speed(), std::memory_order_relaxed);
-        bpm_.store(static_cast<float>(song_->dry.m->get_current_estimated_bpm()), std::memory_order_relaxed);
+        // BPM: beats of rows_per_beat rows at the current speed and tempo (what a MIDI clock would have to send)
+        if (const double rowSec = song_->dry.p->get_row_seconds(); rowSec > 0)
+            bpm_.store(static_cast<float>(60.0 / (rowSec * validRowsPerBeat(rowsPerBeat.load(std::memory_order_relaxed)))),
+                       std::memory_order_relaxed);
         const int n = std::min(data_->channels, kMaxChannels);
         for (int c = 0; c < n; ++c)
         {

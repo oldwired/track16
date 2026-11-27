@@ -551,6 +551,8 @@ Screen::~Screen()
         loader_.join();
     if (layoutDirty_)
         saveLayout();
+    if (beatsDirty_)
+        saveBeats();
     canvas_->deleteAllChildren();
     setLookAndFeel(nullptr);
 }
@@ -565,6 +567,7 @@ void Screen::event(const juce::String& text) { status_->set(status_->event, text
 
 void Screen::start()
 {
+    loadBeats();
     library_.scan(config_.roots);
     browser_->root = juce::String::fromUTF8(library_.root().c_str());
     browser_->select(0);
@@ -739,6 +742,119 @@ void Screen::padPress(int pad0, int velocity, bool fromReader, double nowMs)
 // ---- the single outs ----
 
 bool Screen::outsVisible() const { return view_ == View::Player && static_cast<PadMode>(player_.padMode.load()) == PadMode::Outs; }
+
+// ---- rows per beat ----------------------------------------------------------------------------------------------------
+// How many rows a MIDI beat (24 clock pulses) is: the clock in and out, the beat quantize, the BPM shown. Auto: 4 rows,
+// unless that puts the module's typical row (SongData::rowSeconds) above 200 BPM (then 8, 12) or below 60 (then 2, 1),
+// so fast speed-3 modules come out at the tempo they sound like instead of twice it.
+namespace
+{
+juce::String ratioText(int rpb)
+{
+    switch (rpb)
+    {
+    case 1: return juce::String::fromUTF8("\u00D7\u00BC");
+    case 2: return juce::String::fromUTF8("\u00D7\u00BD");
+    case 3: return juce::String::fromUTF8("\u00D7\u00BE");
+    case 6: return juce::String::fromUTF8("\u00D71.5");
+    default: return juce::String::fromUTF8("\u00D7") + juce::String(rpb / 4);
+    }
+}
+} // namespace
+
+int Screen::beatAuto(const SongData& d) const
+{
+    if (config_.rowsPerBeat > 0)
+        return config_.rowsPerBeat;
+    if (d.rowSeconds <= 0)
+        return 4;
+    const auto bpm = [&](int rpb) { return 60.0 / (d.rowSeconds * rpb); };
+    int rpb = 4;
+    for (int up : {8, 12})
+        if (bpm(rpb) > 200)
+            rpb = up;
+    for (int down : {2, 1})
+        if (bpm(rpb) < 60)
+            rpb = down;
+    return rpb;
+}
+
+void Screen::applyBeat(const SongData& d)
+{
+    const auto it = beats_.find(d.fileName);
+    const int automatic = beatAuto(d), rpb = it != beats_.end() ? it->second : automatic;
+    player_.rowsPerBeat = rpb;
+    logLine("BEAT %s: %d rows per beat (%s), typical row %.1f BPM", d.fileName.c_str(), rpb,
+            it != beats_.end() ? "saved" : config_.rowsPerBeat > 0 ? "rows_per_beat" : "auto",
+            d.rowSeconds > 0 ? 60.0 / (d.rowSeconds * rpb) : 0.0);
+}
+
+void Screen::stepBeat(int dir, bool backToAuto)
+{
+    if (! song_)
+        return;
+    const int automatic = beatAuto(*song_);
+    int rpb = player_.rowsPerBeat.load();
+    if (backToAuto)
+        rpb = automatic;
+    else
+    {
+        const int n = static_cast<int>(std::size(Player::kRowsPerBeat));
+        int i = 0;
+        while (i < n - 1 && Player::kRowsPerBeat[i] < rpb)
+            ++i;
+        rpb = Player::kRowsPerBeat[std::clamp(i + (dir > 0 ? 1 : -1), 0, n - 1)];
+    }
+    player_.rowsPerBeat = rpb;
+    if (rpb == automatic)
+        beats_.erase(song_->fileName);
+    else
+        beats_[song_->fileName] = rpb;
+    beatsDirty_ = true;
+    beatsSaveMs_ = lastFrameMs_ + 1500; // written once the turns pause
+    event("CLOCK " + ratioText(rpb) + ": " + juce::String(rpb) + (rpb == 1 ? " ROW" : " ROWS") + " PER BEAT"
+          + (rpb == automatic ? " (AUTO)" : ""));
+}
+
+bool Screen::beatKnob() const
+{
+    return player_.syncState() != Player::SyncInternal || (player_.midiSync.load() && player_.clockBpm() > 0);
+}
+
+void Screen::loadBeats()
+{
+    beats_.clear();
+    if (config_.dataDir.empty())
+        return;
+    std::ifstream in(config_.dataDir + "/rows_per_beat.txt");
+    std::string line;
+    while (std::getline(in, line))
+    {
+        if (line.empty() || line[0] == '#')
+            continue;
+        const auto space = line.find(' ');
+        if (space == std::string::npos)
+            continue;
+        const int rpb = std::atoi(line.substr(0, space).c_str());
+        if (rpb == Player::validRowsPerBeat(rpb))
+            beats_[line.substr(space + 1)] = rpb;
+    }
+}
+
+void Screen::saveBeats()
+{
+    beatsDirty_ = false;
+    if (config_.dataDir.empty())
+        return;
+    ::mkdir(config_.dataDir.c_str(), 0755);
+    const std::string file = config_.dataDir + "/rows_per_beat.txt";
+    std::ofstream out(file, std::ios::trunc);
+    out << "# Track16: rows per MIDI beat chosen with TEMPO, per module (rows, a space, the file name), see the README\n";
+    for (const auto& [name, rpb] : beats_)
+        out << rpb << ' ' << name << '\n';
+    if (! out)
+        logLine("BEAT cannot write %s", file.c_str());
+}
 
 // The module's own layout (<dataDir>/outs/<file name>.txt), or the default one.
 void Screen::loadLayout()
@@ -959,7 +1075,12 @@ bool Screen::handle(const io::ControlEvent& e, double nowMs)
         knobs_->touchedAt[static_cast<std::size_t>(n - 1)] = nowMs;
         switch (n)
         {
-        case 1: player_.tempoFactor = shift_ ? 1.0f : std::clamp(player_.tempoFactor.load() + 0.01f * static_cast<float>(d), 0.5f, 2.0f); break;
+        case 1:
+            if (beatKnob()) // with a MIDI clock: rows per beat (SHIFT: auto)
+                stepBeat(d, shift_);
+            else
+                player_.tempoFactor = shift_ ? 1.0f : std::clamp(player_.tempoFactor.load() + 0.01f * static_cast<float>(d), 0.5f, 2.0f);
+            break;
         case 2: player_.pitchSemitones = shift_ ? 0.0f : std::clamp(player_.pitchSemitones.load() + static_cast<float>(d), -12.0f, 12.0f); break;
         case 3: player_.stereoSeparation = std::clamp(player_.stereoSeparation.load() + 5 * d, 0, 200); break;
         case 4:
@@ -1249,7 +1370,11 @@ void Screen::frame(double nowMs, float fps)
     if (pending_)
     {
         std::shared_ptr<const SongData> data = pending_->data;
-        if (player_.load(std::move(pending_))) // the player starts it itself when it should play (Song::playOnAdopt)
+        const int beatBefore = player_.rowsPerBeat.load();
+        applyBeat(*data); // before the player starts it
+        if (! player_.load(std::move(pending_))) // the player starts it itself when it should play (Song::playOnAdopt)
+            player_.rowsPerBeat = beatBefore;
+        else
         {
             if (layoutDirty_)
                 saveLayout(); // the last module's
@@ -1276,6 +1401,8 @@ void Screen::frame(double nowMs, float fps)
         }
         if (layoutDirty_ && nowMs >= layoutSaveMs_)
             saveLayout();
+        if (beatsDirty_ && nowMs >= beatsSaveMs_)
+            saveBeats();
         auto& p = *outsPage_;
         bool changed = false;
         changed |= assign(p.song, song_);
@@ -1384,12 +1511,22 @@ void Screen::frame(double nowMs, float fps)
     }
 
     // Knob strip.
-    static const char* const syncText[] = {"", "WAIT", "EXT", "NO CLOCK"};
-    if (const int sync = player_.syncState(); sync != Player::SyncInternal)
-        std::snprintf(t, sizeof t, "%s", syncText[std::clamp(sync, 0, 3)]);
+    // TEMPO: with a MIDI clock the rows per beat, as a ratio to 4 (EXT ×2: twice the rows per beat); else the factor.
+    if (beatKnob())
+    {
+        static const char* const syncText[] = {"CLOCK", "WAIT", "EXT", "NO CLOCK"};
+        const int sync = std::clamp(player_.syncState(), 0, 3), rpb = player_.rowsPerBeat.load();
+        int i = 0;
+        while (i < 6 && Player::kRowsPerBeat[i] < rpb)
+            ++i;
+        knobs_->set(0, static_cast<float>(i) / 6.0f,
+                    sync == Player::SyncLost ? juce::String(syncText[sync]) : juce::String(syncText[sync]) + " " + ratioText(rpb));
+    }
     else
+    {
         std::snprintf(t, sizeof t, "%.0f%%", static_cast<double>(player_.tempoFactor.load() * 100.0f));
-    knobs_->set(0, (player_.tempoFactor.load() - 0.5f) / 1.5f, t);
+        knobs_->set(0, (player_.tempoFactor.load() - 0.5f) / 1.5f, t);
+    }
     std::snprintf(t, sizeof t, "%+.0f ST", static_cast<double>(player_.pitchSemitones.load()));
     knobs_->set(1, (player_.pitchSemitones.load() + 12.0f) / 24.0f, t);
     std::snprintf(t, sizeof t, "%d%%", player_.stereoSeparation.load());
@@ -1769,7 +1906,7 @@ void Screen::lamps(io::LampFrame& f, double) const
                                       : LampState {};
     if (shift_) // SHIFT: the pads' pages; the shown one lit, the others there blinking slowly
     {
-        const int page = player_.page.load(), pages = pageCount();
+        const int pages = pageCount();
         for (int i = 0; i < 4; ++i)
             f[static_cast<C>(static_cast<int>(C::Bar1) + i)] = i == page    ? LampState {LampMode::On, io::lampcolour::white, 0}
                                                                : i < pages ? LampState {LampMode::BlinkSlow, io::lampcolour::white, 0}

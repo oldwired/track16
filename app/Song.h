@@ -58,6 +58,7 @@ struct SongData
     std::string path, fileName, title, artist, type, typeLong, tracker, message;
     int channels = 0, numOrders = 0, numPatterns = 0, numInstruments = 0, numSamples = 0;
     double durationSeconds = 0;
+    double rowSeconds = 0;              // a typical row's length at tempo factor 1 (the first pattern's average)
     std::vector<int> orders;            // pattern per order; −1 = skip ("+++"), −2 = end ("---")
     std::vector<PatternData> patterns;
     std::vector<std::string> instrumentNames; // instruments, or samples when the module has no instruments

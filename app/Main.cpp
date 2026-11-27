@@ -12,7 +12,7 @@
 //   modules=<folder>            where to look for modules (default: the stick)
 //   autoplay=0|1                play the first module at start
 //   stereo=<0…200>  interp=1|2|4|8   libopenmpt's stereo separation (%) and interpolation taps
-//   rows_per_beat=<n>           for the MIDI clock and the beat quantize (default 4)
+//   rows_per_beat=auto|<n>      rows per MIDI beat (clock, beat quantize, BPM): auto per module, or 1, 2, 3, 4, 6, 8, 12
 //   strip_pitch=<1…12>          the PITCH strip's range in semitones each way (default 12)
 //   midi_out=all|din|usb|none   midi_clock=0|1  midi_notes=0|1  midi_offset_ms=<ms>
 //   midi_sync=0|1               follow an external clock and its Start / Continue / Stop / Song Position (default 1)
@@ -69,7 +69,7 @@ std::string trim(std::string s)
 platform::Settings loadSettings(const std::string& file)
 {
     platform::Settings s {{"audio", "1"}, {"midi", "1"}, {"stat", "10"}, {"filter_loop", "1"}, {"audio_period", "128"},
-                          {"audio_periods", "3"}, {"stereo", "100"}, {"interp", "4"}, {"rows_per_beat", "4"},
+                          {"audio_periods", "3"}, {"stereo", "100"}, {"interp", "4"}, {"rows_per_beat", "auto"},
                           {"midi_out", "all"}, {"midi_clock", "1"}, {"midi_notes", "0"}, {"midi_offset_ms", "0"},
                           {"midi_sync", "1"}, {"midi_sync_offset_ms", "0"}, {"midi_in_notes", "channels"}, {"midi_kit_channel", "10"},
                           {"midi_control_channel", "16"}, {"midi_bend_range", "2"},
@@ -148,7 +148,6 @@ int run()
     Player player;
     player.stereoSeparation = number(settings, "stereo", 100);
     player.interpolation = number(settings, "interp", 4);
-    player.rowsPerBeat = number(settings, "rows_per_beat", 4);
     player.stripPitchRange = static_cast<float>(std::clamp(number(settings, "strip_pitch", 12), 1, 12));
     player.midiClock = settings["midi_clock"] == "1";
     player.midiNotes = settings["midi_notes"] == "1";
@@ -222,6 +221,7 @@ int run()
     screenConfig.outStems = std::clamp(number(settings, "out_stems", 4), 0, outs::kMaxStems);
     screenConfig.outsDefault = settings["outs"];
     screenConfig.dataDir = machine->paths().dataDir;
+    screenConfig.rowsPerBeat = settings["rows_per_beat"] == "auto" ? 0 : Player::validRowsPerBeat(number(settings, "rows_per_beat", 4));
     Screen screen(player, midi, screenConfig);
     screen.onQuit = [] { platform::requestQuit(); };
     std::string error;
@@ -327,14 +327,15 @@ int run()
             const auto dbfs = [](float v) { return v > 1e-6f ? 20.0 * std::log10(static_cast<double>(v)) : -120.0; };
             static const char* const syncName[] = {"int", "wait", "ext", "lost"};
             logLine("STAT fps=%.0f dsp=%.1f%% dsp_max=%.1f%% xruns=%llu playing=%d order=%d row=%d route=%d outs=%d/%d%s loop_latency=%d%s"
-                    " loop_live=%d loop_frames=%llu loop_drops=%llu send_peak=%.1fdB return_peak=%.1fdB midi_in=%d midi_out=%d midi_sent=%d sync=%s clock_bpm=%.2f sync_error=%.1fms",
+                    " loop_live=%d loop_frames=%llu loop_drops=%llu send_peak=%.1fdB return_peak=%.1fdB midi_in=%d midi_out=%d midi_sent=%d sync=%s clock_bpm=%.2f sync_error=%.1fms rows_per_beat=%d",
                     static_cast<double>(fps), static_cast<double>(player.loadAverage() * 100), static_cast<double>(player.takeLoadMax() * 100),
                     static_cast<unsigned long long>(st.xruns), player.playing() ? 1 : 0, pos.order, pos.row, static_cast<int>(player.route()),
                     player.outStemsUsed(), player.outStemsTotal(), player.outsUnserved() != 0 ? " (pool full)" : "",
                     player.latencyFrames(), player.stems() ? (player.latencyMeasured() ? " (measured)" : " (fallback)") : " (no loop)",
                     st.loopLive ? 1 : 0, static_cast<unsigned long long>(st.loopFrames), static_cast<unsigned long long>(st.loopDrops),
                     dbfs(sendPeak), dbfs(returnPeak), midi.inputCount(), midi.outputCount(), midi.sentCount(),
-                    syncName[std::clamp(player.syncState(), 0, 3)], static_cast<double>(player.clockBpm()), static_cast<double>(player.syncErrorMs()));
+                    syncName[std::clamp(player.syncState(), 0, 3)], static_cast<double>(player.clockBpm()), static_cast<double>(player.syncErrorMs()),
+                    player.rowsPerBeat.load());
             sendPeak = returnPeak = 0;
             lastStat = now;
         }

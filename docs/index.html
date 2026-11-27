@@ -329,7 +329,7 @@ modules/…       your modules, in any folders</pre>
     act: 'Shows the six encoders\' values, right above them.' });
 
   const ENC = [
-    ['TEMPO', 'Tempo 50…200 % in 1 % steps. While Track16 follows an external MIDI clock, the clock sets the tempo (the knob shows EXT).', 'TEMPO 100 %', 'Back to 100 %.'],
+    ['TEMPO', 'Tempo 50…200 % in 1 % steps. While a MIDI clock comes in, the clock sets the tempo and this knob sets how many rows one beat is: ×¼ … ×3 (1–12 rows per beat, the knob shows EXT ×2 and so on); Track16 picks it per module (4, or 8 for fast modules) and remembers your choice.', 'TEMPO 100 %', 'Back to 100 %. With a MIDI clock: back to the automatic rows per beat.'],
     ['PITCH', 'Pitch −12…+12 semitones.', 'PITCH 0', 'Back to 0.'],
     ['STEREO', 'Stereo separation 0…200 % (100 % = as the module).', '', ''],
     ['INTERP', 'Interpolation: none, linear, cubic, 8-tap sinc.', '', ''],
@@ -366,7 +366,7 @@ modules/…       your modules, in any folders</pre>
       lamp: 'White: the playing order. Amber blinking: the queued jump. Dim in the pattern\'s colour: the other orders.' });
   const BARS = [
     ['PAT', 'END', 'Jumps happen at the end of the current pattern.'],
-    ['BEAT', '', 'Jumps happen on the next beat (rows_per_beat, default 4 rows).'],
+    ['BEAT', '', 'Jumps happen on the next beat (4 rows, or the module\'s rows per beat, see TEMPO).'],
     ['NEXT', 'ROW', 'Jumps happen on the next row.'],
     ['PAT', 'LOOP', 'Pattern loop on/off: the current pattern repeats.'],
   ];
